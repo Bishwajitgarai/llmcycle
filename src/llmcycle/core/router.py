@@ -11,7 +11,7 @@ import time
 import threading
 import logging
 from enum import Enum
-from typing import List, Dict, Optional, Tuple
+from typing import Any, List, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,8 @@ class RoutingStrategy(Enum):
     PRIORITY       = "priority"        # follow explicit sort order
     ROUND_ROBIN    = "round_robin"     # cycle across all providers
     LOWEST_LATENCY = "lowest_latency"  # pick the statistically fastest
+    CANARY         = "canary"          # canary percentage traffic splits
+    WEIGHTED       = "weighted"        # weight-based routing
 
 
 class LatencyTracker:
@@ -50,12 +52,13 @@ class ModelRouter:
         {
           "openai/gpt-4o": ["anthropic/claude-3-5-sonnet", "groq/llama-3.1-70b"],
           "groq": ["together", "fireworks"],   # provider-level fallback
+          "logical-model": {"openai/gpt-4o-mini": 0.85, "groq/llama-3.1-70b": 0.15}  # Canary/Weighted routing
         }
     """
 
     def __init__(
         self,
-        fallbacks: Optional[Dict[str, List[str]]] = None,
+        fallbacks: Optional[Dict[str, Any]] = None,
         strategy: RoutingStrategy = RoutingStrategy.PRIORITY,
     ):
         self.fallbacks = fallbacks or {}
@@ -69,12 +72,35 @@ class ModelRouter:
         Returns ordered list of (provider, model) tuples to try.
         Input model format: "provider/model" or just "model".
         """
+        # Under CANARY or WEIGHTED strategies, look up if a dictionary weight split is configured
+        if self.strategy in (RoutingStrategy.CANARY, RoutingStrategy.WEIGHTED):
+            fb_val = self.fallbacks.get(model)
+            if isinstance(fb_val, dict) and fb_val:
+                import random
+                choices = list(fb_val.keys())
+                weights = list(fb_val.values())
+                selected = random.choices(choices, weights=weights, k=1)[0]
+
+                # Make selected primary, followed by the rest as fallback order sorted by weight descending
+                remaining = [c for c in choices if c != selected]
+                remaining.sort(key=lambda c: fb_val[c], reverse=True)
+
+                candidates = [self._parse(selected)] + [self._parse(r) for r in remaining]
+                return candidates
+
         primary_provider, primary_model = self._parse(model)
         candidates = [(primary_provider, primary_model)]
 
         # Look up fallbacks by full key ("openai/gpt-4o") or provider key ("openai")
         fb_key = model if "/" in model else primary_provider
         fb_list = self.fallbacks.get(fb_key) or self.fallbacks.get(primary_provider, [])
+
+        # If it's a list, treat normally. If it's a dict, use keys.
+        if isinstance(fb_list, dict):
+            # Sort dict keys by weight descending as default ordering
+            fb_keys_sorted = list(fb_list.keys())
+            fb_keys_sorted.sort(key=lambda k: fb_list[k], reverse=True)
+            fb_list = fb_keys_sorted
 
         for fb in fb_list:
             candidates.append(self._parse(fb))

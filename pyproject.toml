@@ -4,10 +4,29 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llmcycle"
-version = "0.1.3"
-description = "Cycle through multiple LLM providers with smart fallback, load balancing, and unified API"
+version = "0.1.4"
+description = "Cycle through multiple LLM providers with smart fallback, load balancing, and unified API with real-time FastAPI dashboard, resilient streaming failover, Pydantic structured output, prompt caching, token budgets, and local/cloud key rotation."
 readme = "README.md"
 requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Bishwajit Garai", email = "102572447+Bishwajitgarai@users.noreply.github.com"}
+]
+keywords = [
+    "llm", "llmops", "routing", "rate-limit", "failover", "key-rotation",
+    "openai", "anthropic", "deepseek", "groq", "fastapi", "caching", "resilience"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules"
+]
+
 dependencies = [
     "fastapi>=0.136.1",
     "httpx>=0.28.1",
@@ -17,6 +36,11 @@ dependencies = [
     "python-multipart>=0.0.29",
     "uvicorn>=0.47.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Bishwajitgarai/llmcycle"
+Repository = "https://github.com/Bishwajitgarai/llmcycle"
+Issues = "https://github.com/Bishwajitgarai/llmcycle/issues"
 
 # ── Storage extras — pick ONE ──────────────────────────────────────────────
 # uv add llmcycle[sqlite]    → SQLite (zero config, local dev)

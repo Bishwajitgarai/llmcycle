@@ -113,20 +113,66 @@ asyncio.run(main())
 
 ---
 
-## ⚙️ Configuration (`.env`)
+## ⚙️ Automatic Environment Discovery (`.env`)
+
+LLMCycle is designed for **zero-boilerplate configuration**. The moment you call `LLMCycle()`, it automatically scans your environment (or `.env` file) to discover, initialize, and register all LLM providers, their API keys, and endpoints.
+
+Here is how the auto-discovery mechanism works under the hood:
+
+### 1. The `*_API_KEYS` Pattern
+LLMCycle searches for any environment variable matching the pattern `{PROVIDER}_API_KEYS`. 
+* **Single Key:** `OPENAI_API_KEYS=sk-proj-...`
+* **Multi-Key Load Balancing (Comma-Separated):** If you provide a comma-separated list of keys, LLMCycle automatically parses them and performs **healthy round-robin key rotation**.
+  ```env
+  # Comma-separate for multi-key rotation and automatic 429/401 resilience
+  OPENAI_API_KEYS=sk-key1,sk-key2,sk-key3
+  DEEPSEEK_API_KEYS=sk-ds-1,sk-ds-2
+  ```
+
+### 2. Provider Default Base URLs & Overrides
+Every recognized provider (Groq, Anthropic, DeepSeek, Google, OpenAI, etc.) has its official production API URL registered out-of-the-box.
+* **Custom Endpoints / Gateways:** You can override any provider's API endpoint dynamically by specifying `{PROVIDER}_BASE_URL`.
+* **Local Models (Ollama, vLLM, LM Studio):** Since local models run locally, you can map their host addresses directly.
+  ```env
+  OLLAMA_API_KEYS=local                     # Local providers require no active keys
+  OLLAMA_BASE_URL=http://localhost:11434/v1 # Overrides default Ollama base URL
+  ```
+
+### 3. Dynamic Custom Providers
+Need to connect to a new or custom OpenAI-compatible gateway? Just set the env variables! LLMCycle will automatically register any custom provider:
+```env
+# Register a custom API gateway named 'mygateway'
+MYGATEWAY_API_KEYS=sk-custom-123
+MYGATEWAY_BASE_URL=https://api.mycustomgateway.com/v1
+```
+You can now immediately route queries to it: `await client.complete("mygateway/some-model", "Hello!")`!
+
+---
+
+### Full `.env` Example
+
+Here is a production-ready `.env` file demonstrating all core features:
 
 ```env
-# ── Keys: comma-separate for multi-key load balancing ──
-OPENAI_API_KEYS=sk-key1,sk-key2,sk-key3
-DEEPSEEK_API_KEYS=sk-ds-1,sk-ds-2
-GROQ_API_KEYS=gsk-abc
-TOGETHER_API_KEYS=ta-xyz
-OLLAMA_API_KEYS=local                     # Ollama needs no real key
+# ── Frontier Providers ──
+OPENAI_API_KEYS=sk-proj-key1,sk-proj-key2
+ANTHROPIC_API_KEYS=sk-ant-key1
+GOOGLE_API_KEYS=AIzaSy...
 
-# ── Override any base URL ──
+# ── Specialized & Fast Aggregators ──
+DEEPSEEK_API_KEYS=sk-ds-1,sk-ds-2
+GROQ_API_KEYS=gsk_...
+TOGETHER_API_KEYS=tg-...
+
+# ── Local & Self-Hosted Overrides ──
+OLLAMA_API_KEYS=local
 OLLAMA_BASE_URL=http://localhost:11434/v1
 
-# ── Dashboard auth ──
+# ── Custom OpenAI-Compatible Gateways ──
+MYGATEWAY_API_KEYS=sk-mykey
+MYGATEWAY_BASE_URL=https://api.mygateway.com/v1
+
+# ── Dashboard Authentication ──
 LLMCYCLE_USER_ADMIN=admin
 LLMCYCLE_USER_ADMIN_PAASWORD=admin
 ```
@@ -268,6 +314,87 @@ await store.save_request(LLMRequest(
 ))
 ```
 
+### 💡 Complete Production Example (End-to-End)
+
+For a fully self-contained production workflow featuring database storage, multi-provider fallbacks, prompt caching, token budget limits, structured Pydantic output, and performance analytics, you can run the complete example script included in the codebase:
+
+```bash
+# Run the complete end-to-end production example
+uv run examples/complete_llm_example.py
+```
+
+Here is the complete production workflow code:
+
+```python
+import asyncio
+from typing import List
+from pydantic import BaseModel, Field
+from llmcycle import LLMCycle, RoutingStrategy
+from llmcycle.storage import StorageBackend, StorageManager
+from llmcycle.storage.models import User, Session
+
+# 1. Define structured outputs
+class UserProfile(BaseModel):
+    name: str = Field(description="The person's name")
+    skills: List[str] = Field(description="Core technical skills")
+    experience_years: int = Field(description="Years of experience")
+
+async def main():
+    # 2. Setup SQLite database storage
+    store = StorageManager(backend=StorageBackend.SQLITE, table_prefix="prod_")
+    await store.connect()
+    
+    # 3. Create tracking session
+    user = await store.create_user(User(username="alice", email="alice@example.com"))
+    session = await store.create_session(Session(user_id=user.id, model="openai/gpt-4o-mini"))
+    
+    # 4. Initialize LLMCycle with Storage & Resilient Routing
+    client = LLMCycle(
+        env_path=".env",
+        storage=store,
+        session_id=session.id,
+        user_id=user.id,
+        strategy=RoutingStrategy.PRIORITY,
+        fallbacks={
+            "deepseek": ["groq", "openai"],
+            "deepseek/deepseek-chat": ["groq/llama-3.1-70b-versatile", "openai/gpt-4o-mini"]
+        }
+    )
+    
+    # 5. Non-streaming request (Auto-logs metadata, latency, cost to DB)
+    response = await client.complete(
+        model="openai/gpt-4o-mini",
+        prompt="Explain key rotation in one sentence."
+    )
+    print(f"[{response.provider}]: {response.content.strip()}")
+    
+    # 6. Resilient streaming completion with mid-stream failover fallback
+    async for chunk in client.stream(
+        model="openai/gpt-4o-mini",
+        prompt="Write a short poem about coding."
+    ):
+        print(chunk, end="", flush=True)
+    print()
+    
+    # 7. Structured Pydantic extraction
+    profile: UserProfile = await client.structured_complete(
+        model="openai/gpt-4o-mini",
+        prompt="Alice is a backend engineer with 5 years experience skilled in Python and FastAPI.",
+        response_model=UserProfile
+    )
+    print(f"Profile: {profile.name}, Skills: {profile.skills}")
+    
+    # 8. Pull production analytics in real-time from the database
+    summary = await store.analytics.summary()
+    print(f"Total Requests Logged: {summary.get('total_requests')}")
+    print(f"Average Latency: {summary.get('avg_latency_ms'):.1f}ms")
+    
+    await store.disconnect()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
 ---
 
 ## 🛡️ Error Handling
@@ -315,77 +442,77 @@ The UI uses a **token-based REST API** (`/api/token` → Bearer token), not serv
 ## 🌐 Supported Providers (70+)
 
 ### Frontier / Cloud
-| Provider | Env Prefix | Base URL |
-|---|---|---|
-| OpenAI | `OPENAI` | `https://api.openai.com/v1` |
-| Anthropic | `ANTHROPIC` | `https://api.anthropic.com/v1` |
-| Google AI Studio | `GOOGLE` | `https://generativelanguage.googleapis.com/v1beta` |
-| Azure OpenAI | `AZURE` | Custom `AZURE_BASE_URL` required |
-| AWS Bedrock | `AWS_BEDROCK` | Custom region URL |
+| Provider | Env Prefix | API Key Pattern Example (Comma-separate for multi-key rotation) | Base URL |
+|---|---|---|---|
+| OpenAI | `OPENAI` | `OPENAI_API_KEYS=sk-proj-...,sk-proj-...` | `https://api.openai.com/v1` |
+| Anthropic | `ANTHROPIC` | `ANTHROPIC_API_KEYS=sk-ant-...,sk-ant-...` | `https://api.anthropic.com/v1` |
+| Google AI Studio | `GOOGLE` | `GOOGLE_API_KEYS=AIzaSy...,AIzaSy...` | `https://generativelanguage.googleapis.com/v1beta` |
+| Azure OpenAI | `AZURE` | `AZURE_API_KEYS=key1,key2` | Custom `AZURE_BASE_URL` required |
+| AWS Bedrock | `AWS_BEDROCK` | `AWS_BEDROCK_API_KEYS=key1` | Custom region URL |
 
 ### Fast Inference / Aggregators
-| Provider | Env Prefix | Base URL |
-|---|---|---|
-| Groq | `GROQ` | `https://api.groq.com/openai/v1` |
-| Together AI | `TOGETHER` | `https://api.together.xyz/v1` |
-| Fireworks AI | `FIREWORKS` | `https://api.fireworks.ai/inference/v1` |
-| Perplexity | `PERPLEXITY` | `https://api.perplexity.ai` |
-| OpenRouter | `OPENROUTER` | `https://openrouter.ai/api/v1` |
-| DeepInfra | `DEEPINFRA` | `https://api.deepinfra.com/v1/openai` |
-| Anyscale | `ANYSCALE` | `https://api.endpoints.anyscale.com/v1` |
-| Novita AI | `NOVITA` | `https://api.novita.ai/v3/openai` |
-| Featherless | `FEATHERLESS` | `https://api.featherless.ai/v1` |
-| Lambda AI | `LAMBDA` | `https://api.lambdalabs.com/v1` |
-| SambaNova | `SAMBANOVA` | `https://api.sambanova.ai/v1` |
-| Cerebras | `CEREBRAS` | `https://api.cerebras.ai/v1` |
-| Hyperbolic | `HYPERBOLIC` | `https://api.hyperbolic.xyz/v1` |
-| Nebius AI | `NEBIUS` | `https://api.studio.nebius.ai/v1` |
-| Nscale | `NSCALE` | `https://inference.api.nscale.com/v1` |
+| Provider | Env Prefix | API Key Pattern Example | Base URL |
+|---|---|---|---|
+| Groq | `GROQ` | `GROQ_API_KEYS=gsk_...,gsk_...` | `https://api.groq.com/openai/v1` |
+| Together AI | `TOGETHER` | `TOGETHER_API_KEYS=tg-...,tg-...` | `https://api.together.xyz/v1` |
+| Fireworks AI | `FIREWORKS` | `FIREWORKS_API_KEYS=fw-...,fw-...` | `https://api.fireworks.ai/inference/v1` |
+| Perplexity | `PERPLEXITY` | `PERPLEXITY_API_KEYS=pplx-...,pplx-...` | `https://api.perplexity.ai` |
+| OpenRouter | `OPENROUTER` | `OPENROUTER_API_KEYS=sk-or-...,sk-or-...` | `https://openrouter.ai/api/v1` |
+| DeepInfra | `DEEPINFRA` | `DEEPINFRA_API_KEYS=di-...,di-...` | `https://api.deepinfra.com/v1/openai` |
+| Anyscale | `ANYSCALE` | `ANYSCALE_API_KEYS=as-...,as-...` | `https://api.endpoints.anyscale.com/v1` |
+| Novita AI | `NOVITA` | `NOVITA_API_KEYS=nv-...,nv-...` | `https://api.novita.ai/v3/openai` |
+| Featherless | `FEATHERLESS` | `FEATHERLESS_API_KEYS=fl-...,fl-...` | `https://api.featherless.ai/v1` |
+| Lambda AI | `LAMBDA` | `LAMBDA_API_KEYS=la-...,la-...` | `https://api.lambdalabs.com/v1` |
+| SambaNova | `SAMBANOVA` | `SAMBANOVA_API_KEYS=sn-...,sn-...` | `https://api.sambanova.ai/v1` |
+| Cerebras | `CEREBRAS` | `CEREBRAS_API_KEYS=csk-...,csk-...` | `https://api.cerebras.ai/v1` |
+| Hyperbolic | `HYPERBOLIC` | `HYPERBOLIC_API_KEYS=hb-...,hb-...` | `https://api.hyperbolic.xyz/v1` |
+| Nebius AI | `NEBIUS` | `NEBIUS_API_KEYS=nb-...,nb-...` | `https://api.studio.nebius.ai/v1` |
+| Nscale | `NSCALE` | `NSCALE_API_KEYS=ns-...,ns-...` | `https://inference.api.nscale.com/v1` |
 
 ### Specialized
-| Provider | Env Prefix | Base URL |
-|---|---|---|
-| DeepSeek | `DEEPSEEK` | `https://api.deepseek.com/v1` |
-| Mistral AI | `MISTRAL` | `https://api.mistral.ai/v1` |
-| Codestral | `CODESTRAL` | `https://codestral.mistral.ai/v1` |
-| Cohere | `COHERE` | `https://api.cohere.com/v1` |
-| AI21 | `AI21` | `https://api.ai21.com/studio/v1` |
-| xAI (Grok) | `XAI` | `https://api.x.ai/v1` |
-| Nvidia NIM | `NVIDIA_NIM` | `https://integrate.api.nvidia.com/v1` |
-| GitHub Models | `GITHUB` | `https://models.inference.ai.azure.com` |
-| Vercel AI | `VERCEL` | `https://ai-gateway.vercel.sh` |
-| FriendliAI | `FRIENDLIAI` | `https://inference.friendli.ai/v1` |
+| Provider | Env Prefix | API Key Pattern Example | Base URL |
+|---|---|---|---|
+| DeepSeek | `DEEPSEEK` | `DEEPSEEK_API_KEYS=sk-...,sk-...` | `https://api.deepseek.com/v1` |
+| Mistral AI | `MISTRAL` | `MISTRAL_API_KEYS=ms-...,ms-...` | `https://api.mistral.ai/v1` |
+| Codestral | `CODESTRAL` | `CODESTRAL_API_KEYS=cs-...,cs-...` | `https://codestral.mistral.ai/v1` |
+| Cohere | `COHERE` | `COHERE_API_KEYS=ch-...,ch-...` | `https://api.cohere.com/v1` |
+| AI21 | `AI21` | `AI21_API_KEYS=ai21-...,ai21-...` | `https://api.ai21.com/studio/v1` |
+| xAI (Grok) | `XAI` | `XAI_API_KEYS=xai-...,xai-...` | `https://api.x.ai/v1` |
+| Nvidia NIM | `NVIDIA_NIM` | `NVIDIA_NIM_API_KEYS=nvapi-...,nvapi-...` | `https://integrate.api.nvidia.com/v1` |
+| GitHub Models | `GITHUB` | `GITHUB_API_KEYS=ghu-...,ghu-...` | `https://models.inference.ai.azure.com` |
+| Vercel AI | `VERCEL` | `VERCEL_API_KEYS=vc-...,vc-...` | `https://ai-gateway.vercel.sh` |
+| FriendliAI | `FRIENDLIAI` | `FRIENDLIAI_API_KEYS=fr-...,fr-...` | `https://inference.friendli.ai/v1` |
 
 ### Chinese / Asia
-| Provider | Env Prefix | Base URL |
-|---|---|---|
-| Qwen (DashScope) | `QWEN` | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
-| Moonshot AI | `MOONSHOT` | `https://api.moonshot.cn/v1` |
-| MiniMax | `MINIMAX` | `https://api.minimax.chat/v1` |
-| Zhipu (Z.AI) | `ZHIPU` | `https://open.bigmodel.cn/api/paas/v4` |
-| Volcano Engine | `VOLCANO` | `https://ark.cn-beijing.volces.com/api/v3` |
+| Provider | Env Prefix | API Key Pattern Example | Base URL |
+|---|---|---|---|
+| Qwen (DashScope) | `QWEN` | `QWEN_API_KEYS=qw-...,qw-...` | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| Moonshot AI | `MOONSHOT` | `MOONSHOT_API_KEYS=ms-...,ms-...` | `https://api.moonshot.cn/v1` |
+| MiniMax | `MINIMAX` | `MINIMAX_API_KEYS=mm-...,mm-...` | `https://api.minimax.chat/v1` |
+| Zhipu (Z.AI) | `ZHIPU` | `ZHIPU_API_KEYS=zp-...,zp-...` | `https://open.bigmodel.cn/api/paas/v4` |
+| Volcano Engine | `VOLCANO` | `VOLCANO_API_KEYS=ve-...,ve-...` | `https://ark.cn-beijing.volces.com/api/v3` |
 
 ### Enterprise / Cloud
-| Provider | Env Prefix | Note |
-|---|---|---|
-| Databricks | `DATABRICKS` | Set `DATABRICKS_BASE_URL` |
-| Snowflake | `SNOWFLAKE` | Set `SNOWFLAKE_BASE_URL` |
-| WatsonX | `WATSONX` | `https://us-south.ml.cloud.ibm.com` |
-| SAP AI Hub | `SAP` | Enterprise endpoint |
-| Oracle OCI | `OCI` | Regional endpoint |
-| Cloudflare AI | `CLOUDFLARE` | Set `CLOUDFLARE_BASE_URL` |
-| Heroku | `HEROKU` | `https://llm.api.heroku.com/v1` |
-| OVHCloud | `OVH` | EU sovereign cloud |
-| Scaleway | `SCALEWAY` | `https://api.scaleway.ai/v1` |
+| Provider | Env Prefix | API Key Pattern Example | Note |
+|---|---|---|---|
+| Databricks | `DATABRICKS` | `DATABRICKS_API_KEYS=db-...,db-...` | Set `DATABRICKS_BASE_URL` |
+| Snowflake | `SNOWFLAKE` | `SNOWFLAKE_API_KEYS=sf-...,sf-...` | Set `SNOWFLAKE_BASE_URL` |
+| WatsonX | `WATSONX` | `WATSONX_API_KEYS=wx-...,wx-...` | `https://us-south.ml.cloud.ibm.com` |
+| SAP AI Hub | `SAP` | `SAP_API_KEYS=sap-...,sap-...` | Enterprise endpoint |
+| Oracle OCI | `OCI` | `OCI_API_KEYS=oci-...,oci-...` | Regional endpoint |
+| Cloudflare AI | `CLOUDFLARE` | `CLOUDFLARE_API_KEYS=cf-...,cf-...` | Set `CLOUDFLARE_BASE_URL` |
+| Heroku | `HEROKU` | `HEROKU_API_KEYS=hk-...,hk-...` | `https://llm.api.heroku.com/v1` |
+| OVHCloud | `OVH` | `OVH_API_KEYS=ovh-...,ovh-...` | EU sovereign cloud |
+| Scaleway | `SCALEWAY` | `SCALEWAY_API_KEYS=sw-...,sw-...` | `https://api.scaleway.ai/v1` |
 
 ### Local / Self-Hosted
-| Provider | Env Prefix | Default URL |
-|---|---|---|
-| Ollama | `OLLAMA` | `http://localhost:11434/v1` |
-| LM Studio | `LM_STUDIO` | `http://localhost:1234/v1` |
-| vLLM | `VLLM` | `http://localhost:8000/v1` |
-| Llamafile | `LLAMAFILE` | `http://localhost:8080/v1` |
-| Xinference | `XINFERENCE` | `http://localhost:9997/v1` |
+| Provider | Env Prefix | API Key Pattern Example | Default URL |
+|---|---|---|---|
+| Ollama | `OLLAMA` | `OLLAMA_API_KEYS=local` | `http://localhost:11434/v1` |
+| LM Studio | `LM_STUDIO` | `LM_STUDIO_API_KEYS=local` | `http://localhost:1234/v1` |
+| vLLM | `VLLM` | `VLLM_API_KEYS=local` | `http://localhost:8000/v1` |
+| Llamafile | `LLAMAFILE` | `LLAMAFILE_API_KEYS=local` | `http://localhost:8080/v1` |
+| Xinference | `XINFERENCE` | `XINFERENCE_API_KEYS=local` | `http://localhost:9997/v1` |
 
 > **Any OpenAI-compatible provider works** — just set `MYPROVIDER_API_KEYS=...` and `MYPROVIDER_BASE_URL=https://...`
 
@@ -399,6 +526,79 @@ from llmcycle.core.router import RoutingStrategy
 RoutingStrategy.PRIORITY        # Default: follow your fallback sort order
 RoutingStrategy.ROUND_ROBIN     # Cycle across all providers equally
 RoutingStrategy.LOWEST_LATENCY  # Always pick the statistically fastest provider
+RoutingStrategy.CANARY          # Canary routing with dynamic split percentages
+RoutingStrategy.WEIGHTED        # Weight-based traffic routing splits
+```
+
+---
+
+## ⚡ Core Enterprise Features (Caching, Rate Limits, Guardrails)
+
+To keep LLMCycle extremely lightweight and fast, all advanced enterprise features are **completely dynamic, self-throttling, and default to `False` / disabled**. You only opt-in and pay the computational cost for exactly what you use.
+
+---
+
+### 1. Pluggable Prompt Caching ♻️
+Avoid duplicate LLM costs and reduce latency down to ~10ms for identical repeating queries. 
+
+* **How it works:** Defaults to `False` (no caching). Passing `cache=True` activates the fast `InMemoryCache`. You can also supply a database-backed pluggable cache instance (e.g. `SQLCache` or `RedisCache`).
+* **TTL Activation:** Set the exact cache lifetime per-call using `cache_ttl` (in seconds).
+
+```python
+from llmcycle import LLMCycle
+from llmcycle.core.cache import SQLCache
+
+# Enable default In-Memory Caching
+client = LLMCycle(cache=True)
+
+# OR pass a SQL / Redis pluggable cache instance
+db_cache = SQLCache("sqlite+aiosqlite:///cache.db")
+client = LLMCycle(cache=db_cache)
+
+# Caching is triggered dynamically by passing `cache_ttl`
+response1 = await client.complete("openai/gpt-4o-mini", "What is 2+2?", cache_ttl=300)
+response2 = await client.complete("openai/gpt-4o-mini", "What is 2+2?", cache_ttl=300) # Served instantly (~1ms) from cache!
+```
+
+---
+
+### 2. Client-Side Rate Limiting 🚦
+Prevent rate-limit failures (HTTP 429) before they even hit your providers using a high-performance token-bucket rate limiter.
+
+* **How it works:** Defaults to `False` (no rate limits). Pass `rate_limits=True` to activate sensible default limits (60 RPM / 40,000 TPM), or supply a custom dictionary mapping models/providers to specific limits.
+* **Fair Queueing:** If a request exceeds RPM or TPM, the rate-limiter automatically pauses and queues execution, waking up exactly when limits replenish.
+
+```python
+# Enable sensible default rate limits (60 RPM, 40,000 TPM)
+client = LLMCycle(rate_limits=True)
+
+# OR configure precise rate limits per model or provider
+client = LLMCycle(
+    rate_limits={
+        "openai/gpt-4o": {"rpm": 100, "tpm": 80000},
+        "groq/llama-3.1-70b": {"rpm": 30, "tpm": 20000},
+    }
+)
+```
+
+---
+
+### 3. PII & Secrets Guardrails 🛡️
+Ensure security compliance and prevent data leaks. LLMCycle intercepts outgoing prompts to dynamically detect and mask sensitive information before they leave your servers, and automatically unmasks the output response before returning it to your application.
+
+* **How it works:** Defaults to `False` (no guardrails). Pass `guardrail=True` to enable state-of-the-art PII and high-entropy secret masking.
+* **Sensitive Types Masked:** Emails, credit card numbers, Social Security Numbers (SSNs), IP addresses, and high-entropy cloud/API tokens.
+
+```python
+# Enable standard PII and Secrets Guardrail
+client = LLMCycle(guardrail=True)
+
+# Outgoing prompt is masked to: "My email is [EMAIL_1] and my key is [API_KEY_1]"
+# Response is automatically unmasked back to the original values!
+response = await client.complete(
+    "openai/gpt-4o-mini", 
+    "Verify this info: My email is alice@example.com and my API key is sk-1234567890abcdef1234567890abcdef"
+)
 ```
 
 ---

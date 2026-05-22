@@ -39,6 +39,23 @@ templates_dir = BASE_DIR / "templates"
 # Global client instance (auto-loads from .env)
 llm_client = LLMCycle()
 
+PRIMARY_MODELS: Dict[str, List[str]] = {
+    "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
+    "anthropic": ["claude-3-5-sonnet", "claude-3-opus", "claude-3-sonnet", "claude-3-haiku"],
+    "google": ["gemini-1.5-pro", "gemini-1.5-flash"],
+    "deepseek": ["deepseek-chat", "deepseek-coder"],
+    "groq": ["llama-3.1-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it"],
+    "together": [
+        "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+        "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+        "mistralai/Mixtral-8x7B-Instruct-v0.1"
+    ],
+    "ollama": ["llama3", "mistral", "phi3", "gemma"],
+    "lm_studio": ["local-model"],
+    "vllm": ["local-model"],
+    "openrouter": ["meta-llama/llama-3.1-70b-instruct", "google/gemini-flash-1.5", "openai/gpt-4o-mini"],
+}
+
 # ─── Pydantic models ─────────────────────────────────────────────────────────
 class TokenResponse(BaseModel):
     access_token: str
@@ -131,9 +148,32 @@ async def add_provider(req: AddProviderRequest, _: str = Depends(auth)):
 
 @app.get("/api/providers/{name}/models")
 async def get_provider_models(name: str, _: str = Depends(auth)):
-    """Fetch the model list from a provider using one of its active keys."""
-    models = await llm_client.get_models(name)
+    """Fetch the model list from a provider, falling back to primary models if empty or failing."""
+    p_lower = name.lower()
+    models = []
+    try:
+        models = await llm_client.get_models(p_lower)
+    except Exception:
+        pass
+    if not models:
+        models = PRIMARY_MODELS.get(p_lower, ["default-model"])
     return {"provider": name, "models": models, "count": len(models)}
+
+@app.get("/api/active_models")
+async def get_active_models(_: str = Depends(auth)):
+    """Get all active/available models grouped by provider with a fallback to primary/default models."""
+    out = {}
+    for p in llm_client.get_providers():
+        p_lower = p.lower()
+        models = []
+        try:
+            models = await llm_client.get_models(p_lower)
+        except Exception:
+            pass
+        if not models:
+            models = PRIMARY_MODELS.get(p_lower, ["default-model"])
+        out[p] = models
+    return out
 
 @app.get("/api/providers/{name}/keys")
 async def get_provider_keys(name: str, _: str = Depends(auth)):

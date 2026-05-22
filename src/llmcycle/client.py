@@ -25,13 +25,14 @@ import logging
 import os
 import time as _time
 from typing import (
-    Any, AsyncGenerator, Callable, Dict, List, Optional, Type, TypeVar
+    Any, AsyncGenerator, Callable, Dict, List, Optional, Type, TypeVar, Union
 )
 
 from dotenv import load_dotenv
 
 from llmcycle.schema import CompletionRequest, CompletionResponse, Message
 from llmcycle.core.keys import KeyManager
+from llmcycle.core.cache import BaseCache, InMemoryCache
 from llmcycle.core.router import ModelRouter, RoutingStrategy
 from llmcycle.core.stream import StreamResilienceManager, RetryPolicy
 from llmcycle.core.errors import (
@@ -161,6 +162,12 @@ class LLMCycle:
         # Context window limits
         context_windows: Optional[Dict[str, int]] = None,
         auto_trim_context: bool = True,    # auto-truncate messages if over context limit
+        # Caching layer
+        cache: Optional[Union[bool, BaseCache]] = False, # Pluggable prompt cache
+        # Rate limits
+        rate_limits: Optional[Union[bool, Dict[str, Dict[str, int]]]] = False,
+        # Guardrails
+        guardrail: Optional[Union[bool, Any]] = False,
     ):
         logging.basicConfig(level=getattr(logging, log_level.upper(), logging.WARNING))
 
@@ -204,8 +211,29 @@ class LLMCycle:
         # ── Aliases  (name → "provider/model") ────────────────────────────────
         self._aliases: Dict[str, str] = {}
 
-        # ── Prompt cache  (cache_key → _CacheEntry) ────────────────────────────
-        self._cache: Dict[str, _CacheEntry] = {}
+        # ── Prompt cache ──────────────────────────────────────────────────────
+        self._cache = None
+        if cache is True:
+            self._cache = InMemoryCache()
+        elif cache:
+            self._cache = cache
+
+        # ── Rate limiting ──────────────────────────────────────────────────────
+        self.rate_limit_manager = None
+        if rate_limits is True:
+            from llmcycle.core.rate_limit import RateLimitManager
+            self.rate_limit_manager = RateLimitManager({"default": {"rpm": 60, "tpm": 40000}})
+        elif rate_limits:
+            from llmcycle.core.rate_limit import RateLimitManager
+            self.rate_limit_manager = RateLimitManager(rate_limits)
+
+        # ── Guardrails ─────────────────────────────────────────────────────────
+        self.guardrail = None
+        if guardrail is True:
+            from llmcycle.core.guardrail import GuardrailManager
+            self.guardrail = GuardrailManager()
+        elif guardrail:
+            self.guardrail = guardrail
 
         # ── Middleware hooks ───────────────────────────────────────────────────
         # Set these to callables:
@@ -362,28 +390,27 @@ class LLMCycle:
         }}, sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()
 
-    def _cache_get(self, key: str) -> Optional[CompletionResponse]:
-        entry = self._cache.get(key)
-        if entry and _time.monotonic() < entry.expires_at:
-            return entry.response
-        if entry:
-            del self._cache[key]
-        return None
+    async def _cache_get(self, key: str) -> Optional[CompletionResponse]:
+        if not self._cache:
+            return None
+        return await self._cache.get(key)
 
-    def _cache_set(self, key: str, response: CompletionResponse, ttl: float) -> None:
-        self._cache[key] = _CacheEntry(response, ttl)
+    async def _cache_set(self, key: str, response: CompletionResponse, ttl: float) -> None:
+        if not self._cache:
+            return
+        await self._cache.set(key, response, ttl)
 
-    def cache_clear(self) -> int:
+    async def cache_clear(self) -> int:
         """Clear all cached responses. Returns number of entries cleared."""
-        n = len(self._cache)
-        self._cache.clear()
-        return n
+        if not self._cache:
+            return 0
+        return await self._cache.clear()
 
-    def cache_stats(self) -> Dict[str, Any]:
+    async def cache_stats(self) -> Dict[str, Any]:
         """Return info about current prompt cache state."""
-        now = _time.monotonic()
-        active = sum(1 for e in self._cache.values() if now < e.expires_at)
-        return {"total": len(self._cache), "active": active, "expired": len(self._cache) - active}
+        if not self._cache:
+            return {}
+        return await self._cache.stats()
 
     # ─── Storage helpers ──────────────────────────────────────────────────────
 
@@ -437,6 +464,22 @@ class LLMCycle:
                 raise ValueError("Provide either 'prompt' or 'messages'.")
             messages = [{"role": "user", "content": prompt}]
 
+        # Rate Limit check
+        if self.rate_limit_manager:
+            prompt_text = prompt or "".join(m.get("content", "") for m in messages)
+            est_tokens = self._estimate_tokens(prompt_text)
+            await self.rate_limit_manager.get_limiter(model).acquire(est_tokens)
+
+        # Guardrails: Mask prompt/messages in-flight
+        if self.guardrail:
+            if messages:
+                messages = [
+                    {**m, "content": self.guardrail.mask_prompt(m["content"])}
+                    for m in messages
+                ]
+            if prompt:
+                prompt = self.guardrail.mask_prompt(prompt)
+
         # Context trim
         if self.auto_trim_context:
             messages = self._trim_messages(messages, model)
@@ -445,7 +488,7 @@ class LLMCycle:
         cache_key = None
         if cache_ttl:
             cache_key = self._cache_key(model, messages, kwargs)
-            cached = self._cache_get(cache_key)
+            cached = await self._cache_get(cache_key)
             if cached:
                 logger.debug(f"Prompt cache hit for model={model}")
                 await self._save(
@@ -485,6 +528,10 @@ class LLMCycle:
         try:
             coro = self._stream_mgr.complete(req, retry_policy=policy)
             response = await (asyncio.wait_for(coro, timeout=timeout) if timeout else coro)
+
+            # Unmask response if guardrails are active
+            if response and response.content and self.guardrail:
+                response.content = self.guardrail.unmask_response(response.content)
 
             # After hook
             if self.on_after:
@@ -542,7 +589,7 @@ class LLMCycle:
 
         # Cache the response
         if cache_key and response:
-            self._cache_set(cache_key, response, cache_ttl)
+            await self._cache_set(cache_key, response, cache_ttl)
 
         return response
 
@@ -581,6 +628,22 @@ class LLMCycle:
                 raise ValueError("Provide either 'prompt' or 'messages'.")
             messages = [{"role": "user", "content": prompt}]
 
+        # Rate Limit check
+        if self.rate_limit_manager:
+            prompt_text = prompt or "".join(m.get("content", "") for m in messages)
+            est_tokens = self._estimate_tokens(prompt_text)
+            await self.rate_limit_manager.get_limiter(model).acquire(est_tokens)
+
+        # Guardrails: Mask prompt/messages in-flight
+        if self.guardrail:
+            if messages:
+                messages = [
+                    {**m, "content": self.guardrail.mask_prompt(m["content"])}
+                    for m in messages
+                ]
+            if prompt:
+                prompt = self.guardrail.mask_prompt(prompt)
+
         if self.auto_trim_context:
             messages = self._trim_messages(messages, model)
 
@@ -606,10 +669,14 @@ class LLMCycle:
                     break
                 if stop_event and stop_event.is_set():
                     status = "cancelled"; cancelled_at = _time.time(); error_msg = "Stream cancelled by caller"
+                    if self.guardrail:
+                        chunk = self.guardrail.unmask_response(chunk)
                     chunks.append(chunk); yield chunk
                     break
                 if first_chunk_at is None:
                     first_chunk_at = _time.monotonic()
+                if self.guardrail:
+                    chunk = self.guardrail.unmask_response(chunk)
                 chunks.append(chunk)
                 yield chunk
         except asyncio.CancelledError:
@@ -622,9 +689,14 @@ class LLMCycle:
             latency_ms = round((_time.monotonic() - t0) * 1000, 2)
             ttft = round((first_chunk_at - t0) * 1000, 2) if first_chunk_at else None
             price = self._get_pricing(model)
+            
+            response_text = "".join(chunks)
+            if self.guardrail:
+                response_text = self.guardrail.unmask_response(response_text)
+                
             await self._save(
                 model=model, provider="",
-                prompt=prompt or "", response="".join(chunks),
+                prompt=prompt or "", response=response_text,
                 latency_ms=latency_ms, time_to_first_token_ms=ttft,
                 timeout_ms=timeout * 1000 if timeout else None,
                 status=status, error=error_msg, cancelled_at=cancelled_at,
@@ -698,6 +770,19 @@ class LLMCycle:
             except Exception as e:
                 last_error = e
                 logger.warning(f"complete_structured parse attempt {attempt+1} failed: {e}")
+                if attempt < max_retries_parse:
+                    # JSON auto-healing correction instruction loop feedback
+                    messages = list(messages) + [
+                        {"role": "assistant", "content": raw},
+                        {
+                            "role": "user",
+                            "content": (
+                                f"The response was not valid JSON or did not match the required schema.\n"
+                                f"Validation Error: {e}\n"
+                                f"Please output ONLY valid JSON matching the schema."
+                            )
+                        }
+                    ]
 
         raise StructuredOutputError(
             f"Failed to parse LLM response into {schema.__name__} after {max_retries_parse+1} attempts: {last_error}",
