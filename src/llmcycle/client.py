@@ -1,15 +1,32 @@
 """
-LLMCycle Client - Main Entry Point
-====================================
-Auto-discovers providers from environment variables.
-Pattern: {PROVIDER}_API_KEYS=key1,key2,key3
-Optional: {PROVIDER}_BASE_URL=https://custom.endpoint.com/v1
+LLMCycle Client - All-in-One LLM Interface
+============================================
+Features:
+  - Auto-discovers providers from .env (*_API_KEYS pattern)
+  - Multi-key rotation with per-key health tracking
+  - Smart routing: Priority / Round-Robin / Lowest-Latency
+  - Resilient streaming with mid-stream failover
+  - Timeout + cancellation tracking (status: success/error/cancelled/timeout)
+  - Auto-save to storage with session/user/team/tags
+  - Model aliases (map "fast" → "groq/llama-3-70b")
+  - Prompt caching (in-memory with TTL, deduplicates identical prompts)
+  - Structured output (parse LLM response into a Pydantic model)
+  - Agentic tool-calling loop with max_tool_calls guard
+  - Budget enforcement (raises BudgetExceededError if cost_usd exceeded)
+  - Context window auto-trim (truncate messages to fit model limits)
+  - Request/response middleware hooks (on_before / on_after)
+  - Parallel batch completions with concurrency control
 """
 from __future__ import annotations
 import asyncio
-import os
+import hashlib
+import json
 import logging
-from typing import Optional, Dict, List, AsyncGenerator
+import os
+import time as _time
+from typing import (
+    Any, AsyncGenerator, Callable, Dict, List, Optional, Type, TypeVar
+)
 
 from dotenv import load_dotenv
 
@@ -17,26 +34,112 @@ from llmcycle.schema import CompletionRequest, CompletionResponse, Message
 from llmcycle.core.keys import KeyManager
 from llmcycle.core.router import ModelRouter, RoutingStrategy
 from llmcycle.core.stream import StreamResilienceManager, RetryPolicy
+from llmcycle.core.errors import (
+    MaxToolCallsExceededError, BudgetExceededError,
+    StructuredOutputError,
+)
 from llmcycle.providers.openai_compatible import OpenAICompatibleProvider
 from llmcycle.providers.registry import PROVIDER_REGISTRY
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
+
+# ─── Pricing registry (USD per 1K tokens) ─────────────────────────────────────
+# Override / extend via client.pricing["gpt-4o"] = {"input": 0.005, "output": 0.015}
+DEFAULT_PRICING: Dict[str, Dict[str, float]] = {
+    "gpt-4o":              {"input": 0.005,   "output": 0.015},
+    "gpt-4o-mini":         {"input": 0.00015, "output": 0.0006},
+    "gpt-4-turbo":         {"input": 0.01,    "output": 0.03},
+    "gpt-3.5-turbo":       {"input": 0.0005,  "output": 0.0015},
+    "claude-3-opus":       {"input": 0.015,   "output": 0.075},
+    "claude-3-sonnet":     {"input": 0.003,   "output": 0.015},
+    "claude-3-haiku":      {"input": 0.00025, "output": 0.00125},
+    "deepseek-chat":       {"input": 0.00014, "output": 0.00028},
+    "llama-3.1-70b":       {"input": 0.00059, "output": 0.00079},
+    "llama-3.1-8b":        {"input": 0.00005, "output": 0.00008},
+    "mixtral-8x7b":        {"input": 0.00024, "output": 0.00024},
+    "gemma-7b-it":         {"input": 0.00007, "output": 0.00007},
+}
+
+# ─── Context window registry (tokens) ─────────────────────────────────────────
+DEFAULT_CONTEXT_WINDOWS: Dict[str, int] = {
+    "gpt-4o":              128_000,
+    "gpt-4o-mini":         128_000,
+    "gpt-4-turbo":         128_000,
+    "gpt-3.5-turbo":       16_385,
+    "claude-3-opus":       200_000,
+    "claude-3-sonnet":     200_000,
+    "claude-3-haiku":      200_000,
+    "deepseek-chat":       64_000,
+    "llama-3.1-70b":       128_000,
+    "llama-3.1-8b":        128_000,
+    "mixtral-8x7b":        32_768,
+    "gemma-7b-it":         8_192,
+}
+
+
+class _CacheEntry:
+    """In-memory prompt cache entry."""
+    __slots__ = ("response", "expires_at")
+    def __init__(self, response: CompletionResponse, ttl: float):
+        self.response   = response
+        self.expires_at = _time.monotonic() + ttl
+
 
 class LLMCycle:
     """
-    The single interface for all LLM operations.
+    All-in-one LLM router and client.
 
-    Auto-loads providers from .env:
-        OPENAI_API_KEYS=sk-1,sk-2
-        GROQ_API_KEYS=gsk-abc
-        OLLAMA_API_KEYS=local          # no real key needed for Ollama
+    Quick start::
 
-    Usage:
         client = LLMCycle()
-        response = await client.complete("openai/gpt-4o", "Explain RAG in one sentence")
+        response = await client.complete("openai/gpt-4o-mini", "What is RAG?")
         async for chunk in client.stream("groq/llama-3.1-70b", "Write a poem"):
             print(chunk, end="")
+
+    With storage auto-save::
+
+        store = StorageManager(backend=StorageBackend.SQLITE)
+        await store.connect()
+        client = LLMCycle(storage=store, session_id="sess-1", user_id="user-1")
+
+    Tool calling loop::
+
+        async def execute_tool(name, args):
+            if name == "get_weather":
+                return {"temp": 18, "city": args["city"]}
+
+        result = await client.complete_with_tools(
+            "openai/gpt-4o",
+            prompt="What is the weather in London?",
+            tools=[{"type": "function", "function": {"name": "get_weather", ...}}],
+            tool_executor=execute_tool,
+            max_tool_calls=5,
+        )
+
+    Structured output::
+
+        class Answer(BaseModel):
+            city: str
+            temperature: int
+
+        answer = await client.complete_structured(
+            "openai/gpt-4o-mini",
+            "What is the weather in London? Reply as JSON.",
+            schema=Answer,
+        )
+        print(answer.city)  # "London"
+
+    Budget enforcement::
+
+        client = LLMCycle(max_cost_usd=1.00)   # raises BudgetExceededError at $1
+
+    Prompt caching::
+
+        response1 = await client.complete("openai/gpt-4o-mini", "What is 2+2?", cache_ttl=300)
+        response2 = await client.complete("openai/gpt-4o-mini", "What is 2+2?", cache_ttl=300)
+        # response2 is served from cache — zero API cost, instant return
     """
 
     def __init__(
@@ -45,9 +148,23 @@ class LLMCycle:
         fallbacks: Optional[Dict[str, List[str]]] = None,
         strategy: RoutingStrategy = RoutingStrategy.PRIORITY,
         log_level: str = "WARNING",
+        # Storage integration
+        storage=None,                      # Optional[StorageManager]
+        session_id: Optional[str] = None,  # default session stamped on all requests
+        user_id: Optional[str] = None,     # default user stamped on all requests
+        team_id: Optional[str] = None,
+        workplace_id: Optional[str] = None,
+        # Budget enforcement
+        max_cost_usd: Optional[float] = None,
+        # Pricing override
+        pricing: Optional[Dict[str, Dict[str, float]]] = None,
+        # Context window limits
+        context_windows: Optional[Dict[str, int]] = None,
+        auto_trim_context: bool = True,    # auto-truncate messages if over context limit
     ):
         logging.basicConfig(level=getattr(logging, log_level.upper(), logging.WARNING))
-        # Safe BOM-aware .env loader (handles UTF-8, UTF-16, UTF-8-BOM)
+
+        # BOM-aware .env loader
         from pathlib import Path as _Path
         env_file = _Path(env_path)
         if env_file.exists():
@@ -65,15 +182,45 @@ class LLMCycle:
                 except (UnicodeDecodeError, UnicodeError):
                     continue
 
-        self.key_manager = KeyManager()
+        self.key_manager  = KeyManager()
         self._providers: Dict[str, OpenAICompatibleProvider] = {}
 
-        self._auto_load_from_env()
+        # ── Storage ────────────────────────────────────────────────────────────
+        self.storage      = storage
+        self.session_id   = session_id
+        self.user_id      = user_id
+        self.team_id      = team_id
+        self.workplace_id = workplace_id
 
-        self.router = ModelRouter(fallbacks=fallbacks or {}, strategy=strategy)
+        # ── Budget ─────────────────────────────────────────────────────────────
+        self.max_cost_usd    = max_cost_usd
+        self._total_cost_usd = 0.0         # accumulated cost this session
+
+        # ── Pricing / context ──────────────────────────────────────────────────
+        self.pricing         = {**DEFAULT_PRICING, **(pricing or {})}
+        self.context_windows = {**DEFAULT_CONTEXT_WINDOWS, **(context_windows or {})}
+        self.auto_trim_context = auto_trim_context
+
+        # ── Aliases  (name → "provider/model") ────────────────────────────────
+        self._aliases: Dict[str, str] = {}
+
+        # ── Prompt cache  (cache_key → _CacheEntry) ────────────────────────────
+        self._cache: Dict[str, _CacheEntry] = {}
+
+        # ── Middleware hooks ───────────────────────────────────────────────────
+        # Set these to callables:
+        #   client.on_before = async def hook(model, messages, kwargs): ...
+        #   client.on_after  = async def hook(model, response): ...
+        #   client.on_error  = async def hook(model, exception): ...
+        self.on_before: Optional[Callable] = None
+        self.on_after:  Optional[Callable] = None
+        self.on_error:  Optional[Callable] = None
+
+        self._auto_load_from_env()
+        self.router      = ModelRouter(fallbacks=fallbacks or {}, strategy=strategy)
         self._stream_mgr = StreamResilienceManager(self.router, self.key_manager, self._providers)
 
-    # ─── Auto-discovery ──────────────────────────────────────────────────
+    # ─── Auto-discovery ──────────────────────────────────────────────────────
 
     def _auto_load_from_env(self):
         """Scan env for *_API_KEYS patterns and register providers."""
@@ -84,34 +231,29 @@ class LLMCycle:
             keys = [k.strip() for k in env_val.split(",") if k.strip()]
             if not keys:
                 continue
-
-            # Resolve base URL: explicit override > registry > inferred wildcard
             base_url = (
                 os.environ.get(f"{provider_name}_BASE_URL")
                 or PROVIDER_REGISTRY.get(provider_name)
                 or f"https://api.{provider_name.lower()}.com/v1"
             )
-
             p_key = provider_name.lower()
             self._providers[p_key] = OpenAICompatibleProvider(base_url, provider_name=p_key)
             self.key_manager.add_keys(p_key, keys)
             logger.info(f"Registered provider [{p_key}] with {len(keys)} key(s) → {base_url}")
 
-    # ─── Provider management ─────────────────────────────────────────────
+    # ─── Provider management ─────────────────────────────────────────────────
 
     def add_provider(self, name: str, api_keys: List[str], base_url: Optional[str] = None):
-        """Manually register a provider at runtime (no env required)."""
+        """Manually register a provider at runtime."""
         p = name.lower()
         url = base_url or PROVIDER_REGISTRY.get(name.upper()) or f"https://api.{p}.com/v1"
         self._providers[p] = OpenAICompatibleProvider(url, provider_name=p)
         self.key_manager.add_keys(p, api_keys)
 
     def get_providers(self) -> List[str]:
-        """List all registered provider names."""
         return list(self._providers.keys())
 
     async def get_models(self, provider: str) -> List[str]:
-        """Fetch available models from a provider using a rotated key."""
         p = provider.lower()
         if p not in self._providers:
             return []
@@ -121,10 +263,141 @@ class LLMCycle:
         return await self._providers[p].get_models(key)
 
     def get_key_stats(self, provider: str) -> List[dict]:
-        """Return per-key health stats for a provider."""
         return self.key_manager.get_stats(provider)
 
-    # ─── Inference ───────────────────────────────────────────────────────
+    # ─── Aliases ─────────────────────────────────────────────────────────────
+
+    def alias(self, name: str, model: str) -> None:
+        """
+        Create a model alias.
+
+        Usage::
+
+            client.alias("fast",    "groq/llama-3.1-70b")
+            client.alias("smart",   "openai/gpt-4o")
+            client.alias("cheap",   "deepseek/deepseek-chat")
+
+            response = await client.complete("fast", "Explain RAG")
+            # resolves to groq/llama-3.1-70b automatically
+        """
+        self._aliases[name] = model
+
+    def _resolve_model(self, model: str) -> str:
+        """Resolve alias → real model string."""
+        return self._aliases.get(model, model)
+
+    # ─── Pricing helpers ─────────────────────────────────────────────────────
+
+    def _get_pricing(self, model: str) -> Optional[Dict[str, float]]:
+        """Return {input, output} pricing for a model (partial match)."""
+        model_lower = model.lower()
+        for key, price in self.pricing.items():
+            if key in model_lower:
+                return price
+        return None
+
+    def _estimate_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> Optional[float]:
+        price = self._get_pricing(model)
+        if not price:
+            return None
+        return (prompt_tokens / 1000) * price["input"] + (completion_tokens / 1000) * price["output"]
+
+    def get_cost_summary(self) -> Dict[str, float]:
+        """Return total accumulated cost for this client session."""
+        return {"total_cost_usd": self._total_cost_usd, "budget_usd": self.max_cost_usd}
+
+    def _check_budget(self, new_cost: Optional[float]) -> None:
+        """Raise BudgetExceededError if adding new_cost would exceed max_cost_usd."""
+        if self.max_cost_usd is not None and new_cost is not None:
+            if self._total_cost_usd + new_cost > self.max_cost_usd:
+                raise BudgetExceededError(
+                    spent=self._total_cost_usd,
+                    budget=self.max_cost_usd,
+                )
+
+    # ─── Context window helpers ───────────────────────────────────────────────
+
+    def _estimate_tokens(self, text: str) -> int:
+        """Rough token estimate: ~4 chars per token."""
+        return max(1, len(text) // 4)
+
+    def _trim_messages(self, messages: List[dict], model: str, reserve: int = 512) -> List[dict]:
+        """
+        Auto-trim messages to fit within the model's context window.
+        Keeps system message + most recent messages. Removes oldest turns first.
+        """
+        limit = self.context_windows.get(model.split("/")[-1], 0)
+        if not limit:
+            return messages
+
+        total = sum(self._estimate_tokens(m.get("content", "")) for m in messages)
+        if total + reserve <= limit:
+            return messages
+
+        result = []
+        # Always keep system messages
+        system = [m for m in messages if m.get("role") == "system"]
+        non_system = [m for m in messages if m.get("role") != "system"]
+
+        # Add non-system from the end (most recent first)
+        budget = limit - reserve - sum(self._estimate_tokens(m.get("content", "")) for m in system)
+        kept = []
+        for m in reversed(non_system):
+            t = self._estimate_tokens(m.get("content", ""))
+            if budget - t >= 0:
+                kept.insert(0, m)
+                budget -= t
+            else:
+                break
+
+        result = system + kept
+        logger.warning(f"Auto-trimmed messages from {len(messages)} to {len(result)} to fit context window.")
+        return result
+
+    # ─── Prompt cache ─────────────────────────────────────────────────────────
+
+    def _cache_key(self, model: str, messages: List[dict], kwargs: dict) -> str:
+        payload = json.dumps({"model": model, "messages": messages, **{
+            k: v for k, v in kwargs.items() if k in ("temperature", "max_tokens", "top_p")
+        }}, sort_keys=True)
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    def _cache_get(self, key: str) -> Optional[CompletionResponse]:
+        entry = self._cache.get(key)
+        if entry and _time.monotonic() < entry.expires_at:
+            return entry.response
+        if entry:
+            del self._cache[key]
+        return None
+
+    def _cache_set(self, key: str, response: CompletionResponse, ttl: float) -> None:
+        self._cache[key] = _CacheEntry(response, ttl)
+
+    def cache_clear(self) -> int:
+        """Clear all cached responses. Returns number of entries cleared."""
+        n = len(self._cache)
+        self._cache.clear()
+        return n
+
+    def cache_stats(self) -> Dict[str, Any]:
+        """Return info about current prompt cache state."""
+        now = _time.monotonic()
+        active = sum(1 for e in self._cache.values() if now < e.expires_at)
+        return {"total": len(self._cache), "active": active, "expired": len(self._cache) - active}
+
+    # ─── Storage helpers ──────────────────────────────────────────────────────
+
+    async def _save(self, **kwargs) -> None:
+        """Fire-and-forget storage save (non-fatal)."""
+        if not self.storage:
+            return
+        try:
+            from llmcycle.storage.models import LLMRequest as _R
+            await self.storage.save_request(_R(**kwargs))
+        except Exception as e:
+            logger.warning(f"Storage save failed (non-fatal): {e}")
+
+    # ─── Inference: complete ──────────────────────────────────────────────────
 
     async def complete(
         self,
@@ -133,25 +406,69 @@ class LLMCycle:
         messages: Optional[List[dict]] = None,
         max_retries: int = 2,
         retry_delay: float = 1.0,
+        timeout: Optional[float] = None,
+        cache_ttl: Optional[float] = None,    # seconds; None = no cache
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        team_id: Optional[str] = None,
+        workplace_id: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        parent_request_id: Optional[str] = None,
+        turn_number: int = 0,
         **kwargs,
     ) -> CompletionResponse:
         """
         One-shot completion with smart retry.
 
         Args:
-            model:       "provider/model-name" or just "model-name"
-            prompt:      Convenience shortcut — wraps in user message
-            messages:    Full messages list (overrides prompt)
-            max_retries: Max total retries across all providers (default: 2).
-                         If the current provider has more keys, rotates key
-                         immediately (no delay). Otherwise waits retry_delay
-                         then tries the next provider in the fallback chain.
-            retry_delay: Seconds to wait before switching providers (default: 1.0).
+            model:              Model string, e.g. "openai/gpt-4o-mini" or an alias.
+            prompt:             User prompt (convenience — builds a single user message).
+            messages:           Full messages list (overrides prompt).
+            cache_ttl:          Cache identical prompts for this many seconds (0 = no cache).
+            parent_request_id:  Link to a parent request (used in tool-call chains).
+            turn_number:        Which turn in an agentic loop (0 = first user turn).
+            timeout:            Raise asyncio.TimeoutError after N seconds.
+            tags:               Labels saved with the storage record.
         """
+        model = self._resolve_model(model)
+
         if messages is None:
             if prompt is None:
                 raise ValueError("Provide either 'prompt' or 'messages'.")
             messages = [{"role": "user", "content": prompt}]
+
+        # Context trim
+        if self.auto_trim_context:
+            messages = self._trim_messages(messages, model)
+
+        # Prompt cache check
+        cache_key = None
+        if cache_ttl:
+            cache_key = self._cache_key(model, messages, kwargs)
+            cached = self._cache_get(cache_key)
+            if cached:
+                logger.debug(f"Prompt cache hit for model={model}")
+                await self._save(
+                    model=model, provider=cached.provider or "",
+                    prompt=prompt or "", response=cached.content or "",
+                    prompt_tokens=cached.prompt_tokens or 0,
+                    completion_tokens=cached.completion_tokens or 0,
+                    status="success", is_cached=True,
+                    session_id=session_id or self.session_id,
+                    user_id=user_id or self.user_id,
+                    team_id=team_id or self.team_id,
+                    workplace_id=workplace_id or self.workplace_id,
+                    tags=tags or [], parent_request_id=parent_request_id,
+                    turn_number=turn_number,
+                )
+                return cached
+
+        # Before hook
+        if self.on_before:
+            try:
+                await self.on_before(model, messages, kwargs)
+            except Exception as e:
+                logger.warning(f"on_before hook raised: {e}")
 
         req = CompletionRequest(
             model=model,
@@ -159,7 +476,77 @@ class LLMCycle:
             **kwargs,
         )
         policy = RetryPolicy(max_retries=max_retries, retry_delay=retry_delay)
-        return await self._stream_mgr.complete(req, retry_policy=policy)
+        t0 = _time.monotonic()
+        error_msg: Optional[str] = None
+        status = "success"
+        cancelled_at: Optional[float] = None
+        response = None
+
+        try:
+            coro = self._stream_mgr.complete(req, retry_policy=policy)
+            response = await (asyncio.wait_for(coro, timeout=timeout) if timeout else coro)
+
+            # After hook
+            if self.on_after:
+                try:
+                    await self.on_after(model, response)
+                except Exception as e:
+                    logger.warning(f"on_after hook raised: {e}")
+
+        except asyncio.CancelledError:
+            status = "cancelled"; cancelled_at = _time.time(); error_msg = "Request cancelled"
+            raise
+        except asyncio.TimeoutError:
+            status = "timeout"; error_msg = f"Exceeded {timeout}s timeout"
+            raise
+        except Exception as e:
+            error_msg = str(e); status = "error"
+            if self.on_error:
+                try:
+                    await self.on_error(model, e)
+                except Exception:
+                    pass
+            raise
+        finally:
+            latency_ms = round((_time.monotonic() - t0) * 1000, 2)
+            cost = self._estimate_cost(
+                model,
+                getattr(response, "prompt_tokens", 0) or 0,
+                getattr(response, "completion_tokens", 0) or 0,
+            )
+            self._check_budget(cost)
+            if cost:
+                self._total_cost_usd += cost
+            price = self._get_pricing(model)
+            await self._save(
+                model=model,
+                provider=getattr(response, "provider", ""),
+                prompt=prompt or "",
+                response=getattr(response, "content", ""),
+                prompt_tokens=getattr(response, "prompt_tokens", 0) or 0,
+                completion_tokens=getattr(response, "completion_tokens", 0) or 0,
+                latency_ms=latency_ms,
+                timeout_ms=timeout * 1000 if timeout else None,
+                status=status, error=error_msg, cancelled_at=cancelled_at,
+                cost_usd=cost,
+                input_cost_per_1k=price["input"] if price else None,
+                output_cost_per_1k=price["output"] if price else None,
+                session_id=session_id or self.session_id,
+                user_id=user_id or self.user_id,
+                team_id=team_id or self.team_id,
+                workplace_id=workplace_id or self.workplace_id,
+                tags=tags or [],
+                parent_request_id=parent_request_id,
+                turn_number=turn_number,
+            )
+
+        # Cache the response
+        if cache_key and response:
+            self._cache_set(cache_key, response, cache_ttl)
+
+        return response
+
+    # ─── Inference: stream ────────────────────────────────────────────────────
 
     async def stream(
         self,
@@ -169,44 +556,33 @@ class LLMCycle:
         max_retries: int = 2,
         retry_delay: float = 1.0,
         stop_event: Optional[asyncio.Event] = None,
+        timeout: Optional[float] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        team_id: Optional[str] = None,
+        workplace_id: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        parent_request_id: Optional[str] = None,
+        turn_number: int = 0,
         **kwargs,
     ) -> AsyncGenerator[str, None]:
         """
-        Resilient streaming with smart retry and mid-stream stop support.
+        Resilient streaming with mid-stream cancellation tracking.
 
-        Args:
-            model:       "provider/model-name" or just "model-name"
-            prompt:      Convenience shortcut
-            messages:    Full messages list (overrides prompt)
-            max_retries: Max retries across providers (default: 2).
-                         Rotates key immediately if one is available;
-                         otherwise waits retry_delay then tries next provider.
-            retry_delay: Seconds between provider switches (default: 1.0).
-            stop_event:  asyncio.Event — set() it to stop the stream cleanly
-                         at the next chunk boundary from any coroutine.
-
-        Usage:
-            # Simple
-            async for chunk in client.stream("deepseek/deepseek-chat", "Hello!"):
-                print(chunk, end="", flush=True)
-
-            # With custom retry
-            async for chunk in client.stream("groq/llama-3.1-70b", "Hello!",
-                                              max_retries=4, retry_delay=2.0):
-                print(chunk, end="", flush=True)
-
-            # Stop mid-stream from outside
-            stop = asyncio.Event()
-            async for chunk in client.stream("openai/gpt-4o", "Write a novel",
-                                              stop_event=stop):
-                print(chunk, end="", flush=True)
-                if some_condition:
-                    stop.set()  # clean stop
+        stop_event.set() → status="cancelled" saved to storage.
+        asyncio.CancelledError → status="cancelled" saved to storage.
+        timeout exceeded → status="timeout" saved to storage.
+        No other library tracks mid-stream cancel lifecycle in persistent storage.
         """
+        model = self._resolve_model(model)
+
         if messages is None:
             if prompt is None:
                 raise ValueError("Provide either 'prompt' or 'messages'.")
             messages = [{"role": "user", "content": prompt}]
+
+        if self.auto_trim_context:
+            messages = self._trim_messages(messages, model)
 
         req = CompletionRequest(
             model=model,
@@ -215,5 +591,335 @@ class LLMCycle:
             **kwargs,
         )
         policy = RetryPolicy(max_retries=max_retries, retry_delay=retry_delay)
-        async for chunk in self._stream_mgr.safe_stream(req, stop_event=stop_event, retry_policy=policy):
-            yield chunk
+        t0 = _time.monotonic()
+        deadline = (t0 + timeout) if timeout else None
+        chunks: List[str] = []
+        error_msg: Optional[str] = None
+        status = "success"
+        cancelled_at: Optional[float] = None
+        first_chunk_at: Optional[float] = None
+
+        try:
+            async for chunk in self._stream_mgr.safe_stream(req, stop_event=stop_event, retry_policy=policy):
+                if deadline and _time.monotonic() > deadline:
+                    status = "timeout"; error_msg = f"Stream exceeded {timeout}s"; cancelled_at = _time.time()
+                    break
+                if stop_event and stop_event.is_set():
+                    status = "cancelled"; cancelled_at = _time.time(); error_msg = "Stream cancelled by caller"
+                    chunks.append(chunk); yield chunk
+                    break
+                if first_chunk_at is None:
+                    first_chunk_at = _time.monotonic()
+                chunks.append(chunk)
+                yield chunk
+        except asyncio.CancelledError:
+            status = "cancelled"; cancelled_at = _time.time(); error_msg = "Stream task cancelled"
+            raise
+        except Exception as e:
+            error_msg = str(e); status = "error"
+            raise
+        finally:
+            latency_ms = round((_time.monotonic() - t0) * 1000, 2)
+            ttft = round((first_chunk_at - t0) * 1000, 2) if first_chunk_at else None
+            price = self._get_pricing(model)
+            await self._save(
+                model=model, provider="",
+                prompt=prompt or "", response="".join(chunks),
+                latency_ms=latency_ms, time_to_first_token_ms=ttft,
+                timeout_ms=timeout * 1000 if timeout else None,
+                status=status, error=error_msg, cancelled_at=cancelled_at,
+                session_id=session_id or self.session_id,
+                user_id=user_id or self.user_id,
+                team_id=team_id or self.team_id,
+                workplace_id=workplace_id or self.workplace_id,
+                tags=tags or [],
+                parent_request_id=parent_request_id,
+                turn_number=turn_number,
+            )
+
+    # ─── Structured output ────────────────────────────────────────────────────
+
+    async def complete_structured(
+        self,
+        model: str,
+        prompt: Optional[str] = None,
+        messages: Optional[List[dict]] = None,
+        schema: Type[T] = None,
+        max_retries_parse: int = 2,
+        **kwargs,
+    ) -> T:
+        """
+        Return a parsed Pydantic model instead of raw text.
+
+        The LLM is instructed to respond in JSON. The response is parsed
+        into `schema`. Retries up to max_retries_parse times on parse failure.
+
+        Usage::
+
+            class WeatherAnswer(BaseModel):
+                city: str
+                temperature_c: float
+                conditions: str
+
+            answer = await client.complete_structured(
+                "openai/gpt-4o-mini",
+                prompt="What's the weather in London? Reply as JSON.",
+                schema=WeatherAnswer,
+            )
+            print(answer.city, answer.temperature_c)
+        """
+        if schema is None:
+            raise ValueError("schema= is required for complete_structured()")
+
+        schema_hint = f"Reply ONLY with valid JSON matching this schema: {schema.model_json_schema()}"
+        if messages is None:
+            if prompt is None:
+                raise ValueError("Provide either 'prompt' or 'messages'.")
+            messages = [
+                {"role": "system", "content": schema_hint},
+                {"role": "user", "content": prompt},
+            ]
+        else:
+            messages = [{"role": "system", "content": schema_hint}] + list(messages)
+
+        last_error = None
+        for attempt in range(max_retries_parse + 1):
+            response = await self.complete(model, messages=messages, **kwargs)
+            raw = (response.content or "").strip()
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+            try:
+                data = json.loads(raw)
+                return schema.model_validate(data)
+            except Exception as e:
+                last_error = e
+                logger.warning(f"complete_structured parse attempt {attempt+1} failed: {e}")
+
+        raise StructuredOutputError(
+            f"Failed to parse LLM response into {schema.__name__} after {max_retries_parse+1} attempts: {last_error}",
+            raw_response=raw,
+        )
+
+    # ─── Agentic tool loop ────────────────────────────────────────────────────
+
+    async def complete_with_tools(
+        self,
+        model: str,
+        prompt: Optional[str] = None,
+        messages: Optional[List[dict]] = None,
+        tools: Optional[List[dict]] = None,
+        tool_executor: Optional[Callable] = None,
+        max_tool_calls: int = 10,
+        timeout: Optional[float] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        **kwargs,
+    ) -> CompletionResponse:
+        """
+        Run a full agentic tool-calling loop.
+
+        Automatically:
+          1. Calls the LLM with your tools list
+          2. Detects tool_calls in the response
+          3. Executes each tool via tool_executor(name, arguments) -> result
+          4. Appends tool results to messages and loops
+          5. Stops when the model returns a final text response (no tool calls)
+          6. Raises MaxToolCallsExceededError if max_tool_calls is exceeded
+          7. Saves every intermediate request + tool call to storage
+
+        Args:
+            model:          "provider/model-name"
+            prompt:         User prompt (or pass messages=)
+            messages:       Full messages list (overrides prompt)
+            tools:          OpenAI-format tool definitions list
+            tool_executor:  async or sync callable: (name: str, arguments: dict) -> Any
+                            Return value is JSON-serialized and sent back to the LLM
+            max_tool_calls: Hard cap on total tool calls (default: 10)
+            timeout:        Per-turn timeout in seconds
+
+        Usage::
+
+            async def my_tools(name, args):
+                if name == "get_weather":
+                    return {"temp": 18, "city": args["city"]}
+                if name == "search":
+                    return {"results": ["doc1", "doc2"]}
+
+            final = await client.complete_with_tools(
+                "openai/gpt-4o",
+                prompt="What is the weather in London and Paris?",
+                tools=[get_weather_schema, search_schema],
+                tool_executor=my_tools,
+                max_tool_calls=6,
+            )
+            print(final.content)
+        """
+        model = self._resolve_model(model)
+
+        if messages is None:
+            if prompt is None:
+                raise ValueError("Provide either 'prompt' or 'messages'.")
+            messages = [{"role": "user", "content": prompt}]
+
+        messages = list(messages)  # local copy
+        tool_call_count = 0
+        parent_req_id: Optional[str] = None
+
+        while True:
+            response = await self.complete(
+                model,
+                messages=messages,
+                tools=tools or [],
+                timeout=timeout,
+                session_id=session_id or self.session_id,
+                user_id=user_id or self.user_id,
+                tags=tags,
+                parent_request_id=parent_req_id,
+                turn_number=tool_call_count,
+                **kwargs,
+            )
+
+            # Track parent chain
+            if hasattr(response, "request_id"):
+                parent_req_id = response.request_id
+
+            # Check if the model wants to call tools
+            raw_tool_calls = getattr(response, "tool_calls", None) or []
+
+            if not raw_tool_calls:
+                # No tool calls — this is the final response
+                return response
+
+            # Append the assistant turn with tool calls to messages
+            messages.append({
+                "role": "assistant",
+                "content": response.content or "",
+                "tool_calls": raw_tool_calls,
+            })
+
+            # Execute each tool call
+            for tc in raw_tool_calls:
+                if tool_call_count >= max_tool_calls:
+                    raise MaxToolCallsExceededError(
+                        tool_call_count=tool_call_count,
+                        max_tool_calls=max_tool_calls,
+                        partial_messages=messages,
+                    )
+
+                tc_id   = tc.get("id", "")
+                tc_name = tc.get("function", {}).get("name", "")
+                tc_args_raw = tc.get("function", {}).get("arguments", "{}")
+
+                try:
+                    tc_args = json.loads(tc_args_raw) if isinstance(tc_args_raw, str) else tc_args_raw
+                except json.JSONDecodeError:
+                    tc_args = {}
+
+                # Execute
+                if tool_executor:
+                    if asyncio.iscoroutinefunction(tool_executor):
+                        result = await tool_executor(tc_name, tc_args)
+                    else:
+                        result = tool_executor(tc_name, tc_args)
+                else:
+                    result = {"error": f"No tool_executor registered for '{tc_name}'"}
+
+                result_str = json.dumps(result) if not isinstance(result, str) else result
+
+                # Save tool call to storage
+                if self.storage:
+                    try:
+                        from llmcycle.storage.models import ToolCall as _TC
+                        _tc_obj = _TC(
+                            request_id=parent_req_id or "",
+                            session_id=session_id or self.session_id,
+                            user_id=user_id or self.user_id,
+                            name=tc_name,
+                            arguments=tc_args,
+                            arguments_raw=tc_args_raw if isinstance(tc_args_raw, str) else json.dumps(tc_args_raw),
+                            result=result_str,
+                            executed_at=_time.time(),
+                            status="success",
+                        )
+                        await self.storage.save_tool_call(_tc_obj)
+                    except Exception as e:
+                        logger.warning(f"Tool call storage save failed: {e}")
+
+                # Append tool result to messages
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": result_str,
+                })
+                tool_call_count += 1
+
+    # ─── Batch completions ────────────────────────────────────────────────────
+
+    async def complete_batch(
+        self,
+        model: str,
+        prompts: List[str],
+        max_retries: int = 2,
+        retry_delay: float = 1.0,
+        timeout: Optional[float] = None,
+        cache_ttl: Optional[float] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        concurrency: int = 5,
+        **kwargs,
+    ) -> List[Optional[CompletionResponse]]:
+        """
+        Run multiple prompts in parallel against the same model.
+
+        Returns a list in the same order as prompts. Failed items return None.
+
+        Usage::
+
+            responses = await client.complete_batch(
+                "openai/gpt-4o-mini",
+                ["Explain RAG", "Explain LoRA", "Explain RLHF"],
+                concurrency=3,
+            )
+        """
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _one(p: str) -> Optional[CompletionResponse]:
+            async with sem:
+                try:
+                    return await self.complete(
+                        model, prompt=p,
+                        max_retries=max_retries, retry_delay=retry_delay,
+                        timeout=timeout, cache_ttl=cache_ttl,
+                        session_id=session_id, user_id=user_id, tags=tags,
+                        **kwargs,
+                    )
+                except Exception as e:
+                    logger.warning(f"Batch item failed: {e}")
+                    return None
+
+        return list(await asyncio.gather(*[_one(p) for p in prompts]))
+
+    # ─── Context manager support ─────────────────────────────────────────────
+
+    async def __aenter__(self):
+        if self.storage:
+            await self.storage.connect()
+        return self
+
+    async def __aexit__(self, *_):
+        if self.storage:
+            await self.storage.disconnect()
+
+    def __repr__(self) -> str:
+        return (
+            f"LLMCycle(providers={self.get_providers()}, "
+            f"strategy={self.router.strategy.value}, "
+            f"storage={'yes' if self.storage else 'no'}, "
+            f"cost=${self._total_cost_usd:.4f})"
+        )

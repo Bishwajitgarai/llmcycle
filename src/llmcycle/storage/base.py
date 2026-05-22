@@ -7,7 +7,8 @@ from enum import Enum
 from typing import Optional, List
 
 from llmcycle.storage.models import (
-    Workplace, Team, User, Session, LLMRequest, HistoryMessage
+    Workplace, Team, User, Session, LLMRequest, HistoryMessage,
+    ToolCall, RequestFeedback,
 )
 
 
@@ -125,7 +126,66 @@ class BaseStorage(ABC):
 
     # ── History ──────────────────────────────────────────────────────
     @abstractmethod
-    async def append_history(self, msg: HistoryMessage) -> HistoryMessage: ...
+    async def add_message(self, msg: HistoryMessage) -> HistoryMessage: ...
+
+    async def add_messages(
+        self, msgs: "List[HistoryMessage]"
+    ) -> "List[HistoryMessage]":
+        """
+        Persist multiple messages in order (batch helper).
+
+        Default implementation calls add_message() sequentially.
+        Override for atomic batch inserts.
+
+        Usage::
+
+            await store.add_messages([
+                HistoryMessage(session_id=sid, role="user",      content="Hi"),
+                HistoryMessage(session_id=sid, role="assistant", content="Hello!"),
+            ])
+        """
+        results = []
+        for m in msgs:
+            results.append(await self.add_message(m))
+        return results
+
+    async def add_turn(
+        self,
+        session_id: str,
+        user_content: str,
+        assistant_content: str,
+        request_id: str = "",
+        metadata: dict = None,
+    ) -> "List[HistoryMessage]":
+        """
+        Add a complete user + assistant turn in one call.
+
+        Usage::
+
+            msgs = await store.add_turn(
+                session_id="sess-1",
+                user_content="What is RAG?",
+                assistant_content="RAG stands for Retrieval-Augmented Generation.",
+                request_id=req.id,
+            )
+        """
+        from llmcycle.storage.models import HistoryMessage as _HM
+        user_msg = _HM(
+            session_id=session_id, role="user",
+            content=user_content, metadata=metadata or {},
+        )
+        asst_msg = _HM(
+            session_id=session_id, role="assistant",
+            content=assistant_content,
+            request_id=request_id or None,
+            metadata=metadata or {},
+        )
+        return await self.add_messages([user_msg, asst_msg])
+
+    # Backward-compat alias (deprecated — use add_message instead)
+    async def append_history(self, msg: "HistoryMessage") -> "HistoryMessage":
+        """Deprecated. Use add_message() instead."""
+        return await self.add_message(msg)
 
     @abstractmethod
     async def get_history(self, session_id: str,
@@ -173,4 +233,127 @@ class BaseStorage(ABC):
             # Delete all cached data (full wipe)
             await store.purge_by_range(entities=["all"])
         """
+        ...
+
+    # ── Request lifecycle ────────────────────────────────────────────
+    @abstractmethod
+    async def update_request_status(
+        self,
+        request_id: str,
+        status: str,
+        error: Optional[str] = None,
+        cancelled_at: Optional[float] = None,
+    ) -> None:
+        """
+        Update only the status (and optional error/cancelled_at) of an existing request.
+        Used for mid-stream cancellation and timeout tracking without re-saving the full record.
+
+        Args:
+            request_id:   LLMRequest.id to update.
+            status:       New status — "success" | "error" | "cancelled" | "timeout".
+            error:        Optional error message to store.
+            cancelled_at: Unix timestamp of when the cancellation occurred.
+
+        Examples::
+
+            # Mark a request as cancelled mid-stream
+            await store.update_request_status(
+                req_id,
+                status="cancelled",
+                cancelled_at=time.time(),
+            )
+
+            # Mark as timed out
+            await store.update_request_status(req_id, status="timeout", error="Exceeded 30s")
+        """
+        ...
+
+    @abstractmethod
+    async def cancel_request(self, request_id: str) -> None:
+        """
+        Convenience shortcut: mark a request as cancelled right now.
+        Equivalent to: update_request_status(id, "cancelled", cancelled_at=time.time())
+        """
+        ...
+
+    # ── Tool calls ───────────────────────────────────────────────────
+    @abstractmethod
+    async def save_tool_call(self, tool_call: ToolCall) -> ToolCall:
+        """
+        Persist a tool/function call returned by the LLM.
+
+        Usage::
+
+            tool = ToolCall(
+                request_id=req.id,
+                name="get_weather",
+                arguments={"city": "London"},
+                arguments_raw='{\"city\": \"London\"}',
+            )
+            saved = await store.save_tool_call(tool)
+        """
+        ...
+
+    @abstractmethod
+    async def update_tool_call(self, tool_call: ToolCall) -> ToolCall:
+        """
+        Update a tool call with its execution result.
+
+        Usage::
+
+            tool.result = json.dumps({"temp": 18})
+            tool.executed_at = time.time()
+            tool.status = "success"
+            await store.update_tool_call(tool)
+        """
+        ...
+
+    @abstractmethod
+    async def list_tool_calls(
+        self,
+        request_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[ToolCall]:
+        """
+        List tool calls filtered by request, session, or status.
+
+        Examples::
+
+            # All tool calls for a request
+            tools = await store.list_tool_calls(request_id=req.id)
+
+            # All pending tool calls in a session
+            pending = await store.list_tool_calls(session_id=sid, status="pending")
+        """
+        ...
+
+    # ── Feedback ─────────────────────────────────────────────────────
+    @abstractmethod
+    async def save_feedback(self, feedback: RequestFeedback) -> RequestFeedback:
+        """
+        Save human feedback (thumbs up/down, rating, comment) on a completed request.
+
+        Usage::
+
+            await store.save_feedback(RequestFeedback(
+                request_id=req.id,
+                user_id="user-123",
+                thumbs_up=True,
+                rating=5,
+                comment="Perfect!",
+            ))
+        """
+        ...
+
+    @abstractmethod
+    async def list_feedback(
+        self,
+        request_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[RequestFeedback]:
+        """List feedback records filtered by request, user, or session."""
         ...

@@ -61,7 +61,11 @@ were slow, or how many tokens you were burning. We built all of that in.
 ## ⚡ 30-Second Quickstart
 
 ```bash
+# pip
 pip install llmcycle
+
+# uv (recommended — faster)
+uv add llmcycle
 ```
 
 ```python
@@ -80,19 +84,32 @@ asyncio.run(main())
 
 ---
 
-## 🏆 Why LLMCycle Beats LiteLLM
+## 🏆 How LLMCycle Compares
 
-| Feature | LiteLLM | **LLMCycle** |
-|---|---|---|
-| Multi-key per provider | ❌ | ✅ Unlimited keys, auto round-robin |
-| 429 Rate-Limit handling | Basic | ✅ Per-key cooldown, auto-recovery |
-| 401 Auth error | Raises exception | ✅ Disables key, auto-rotates |
-| Mid-stream failover | ❌ | ✅ Captures partial text + continues |
-| Sort-order routing | Basic | ✅ Priority / Round-Robin / Lowest-Latency |
-| Auto provider discovery | ❌ | ✅ Reads `*_API_KEYS` from `.env` |
-| 70+ providers | ✅ | ✅ Same coverage |
-| Web Dashboard | ❌ | ✅ Token-auth REST API + SPA UI |
-| Zero mandatory deps | ❌ | ✅ `httpx` + `pydantic` only |
+> We respect every library below — they solve different problems. This table focuses on **LLM routing & reliability** features specifically.
+
+| Feature | LLMCycle | LiteLLM | LangChain | OpenAI SDK | Portkey | aisuite |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Multi-key per provider** | ✅ Unlimited | ❌ | ❌ | ❌ | ✅ Paid | ❌ |
+| **Auto key round-robin** | ✅ | ❌ | ❌ | ❌ | ✅ Paid | ❌ |
+| **429 per-key cooldown + recovery** | ✅ | Basic | ❌ | ❌ | ✅ Paid | ❌ |
+| **401 → auto disable key** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Mid-stream failover** | ✅ with context | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Provider auto-discovery from `.env`** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Priority / Round-Robin / Latency routing** | ✅ | ❌ | ❌ | ❌ | ✅ Paid | ❌ |
+| **Fallback chains (model + provider level)** | ✅ | Partial | Partial | ❌ | ✅ Paid | ❌ |
+| **70+ providers** | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| **Streaming** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| **Storage layer (SQL/Mongo/Redis)** | ✅ Built-in | ❌ | Partial | ❌ | ❌ | ❌ |
+| **Session / user / history tracking** | ✅ | ❌ | Partial | ❌ | ✅ Paid | ❌ |
+| **Analytics (tokens, latency, errors)** | ✅ | ❌ | ❌ | ❌ | ✅ Paid | ❌ |
+| **Purge data by date range** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Web dashboard (SPA + REST API)** | ✅ | ❌ | ❌ | ❌ | ✅ Paid | ❌ |
+| **Zero mandatory extra deps** | ✅ httpx+pydantic | ❌ Heavy | ❌ Heavy | ✅ | ❌ | ✅ |
+| **Fully open source & free** | ✅ MIT | ✅ MIT | ✅ MIT | ✅ | ❌ Freemium | ✅ MIT |
+| **Self-hostable** | ✅ | ✅ | ✅ | ✅ | ❌ Cloud | ✅ |
+
+> **Legend:** ✅ = Supported, ❌ = Not supported, Partial = Limited support, Paid = Requires paid plan
 
 ---
 
@@ -188,6 +205,67 @@ client.add_provider(
     api_keys=["sk-abc", "sk-def"],
     base_url="https://api.myprovider.com/v1",
 )
+```
+
+### Auto-save every request to storage
+
+Pass `storage=` into `LLMCycle` and every `complete()` / `stream()` call **automatically** saves an `LLMRequest` record — no manual `save_request` needed.
+
+```python
+from llmcycle import LLMCycle
+from llmcycle.storage import StorageBackend, StorageManager
+
+# Set up storage once
+store = StorageManager(
+    backend=StorageBackend.SQLITE,   # or POSTGRES, MONGO, REDIS ...
+    table_prefix="myapp_",
+)
+await store.connect()
+
+# Pass into client — all calls auto-save
+client = LLMCycle(
+    storage=store,
+    session_id="sess-abc",   # stamped on every request (optional)
+    user_id="user-123",      # stamped on every request (optional)
+)
+
+# ✅ This now auto-saves an LLMRequest record to storage
+response = await client.complete("openai/gpt-4o-mini", "What is RAG?")
+
+# ✅ Streaming also auto-saves (once stream completes)
+async for chunk in client.stream("groq/llama-3.1-70b", "Write a haiku"):
+    print(chunk, end="", flush=True)
+
+# Override session/user per-call
+response = await client.complete(
+    model="deepseek/deepseek-chat",
+    prompt="Explain transformers",
+    session_id="sess-xyz",   # overrides client-level session_id
+    user_id="user-456",
+)
+
+# Query what was saved
+requests = await store.list_requests(user_id="user-123")
+stats = await store.analytics.summary()
+```
+
+You can still manually save if needed:
+
+```python
+from llmcycle.storage.models import LLMRequest
+
+await store.save_request(LLMRequest(
+    model="gpt-4o-mini",
+    provider="openai",
+    prompt="What is RAG?",
+    response="RAG is...",
+    prompt_tokens=12,
+    completion_tokens=80,
+    latency_ms=340,
+    status="success",
+    session_id=session.id,
+    user_id=user.id,
+))
 ```
 
 ---
@@ -328,9 +406,38 @@ RoutingStrategy.LOWEST_LATENCY  # Always pick the statistically fastest provider
 ## 🚀 CLI
 
 ```bash
-llmcycle providers    # List all loaded providers + key health
-llmcycle ui           # Start web dashboard (http://127.0.0.1:8000)
-llmcycle ui --port 9000 --reload
+llmcycle providers           # List all loaded providers + key health
+llmcycle ui                  # Start dashboard on http://127.0.0.1:8000
+```
+
+### Changing the UI port / host
+
+```bash
+# Custom port
+llmcycle ui --port 9000
+
+# Custom host + port (expose to network)
+llmcycle ui --host 0.0.0.0 --port 9000
+
+# Dev mode with auto-reload on code changes
+llmcycle ui --port 8080 --reload
+
+# All options
+llmcycle ui --help
+```
+
+### Via env variables (permanent config)
+
+```env
+# .env
+LLMCYCLE_UI_HOST=0.0.0.0
+LLMCYCLE_UI_PORT=9000
+```
+
+Then just run:
+
+```bash
+llmcycle ui    # picks up host/port from .env automatically
 ```
 
 ---

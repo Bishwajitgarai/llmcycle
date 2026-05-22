@@ -205,7 +205,7 @@ class RedisStorage(BaseStorage):
         return out
 
     # ── History ──────────────────────────────────────────────────────
-    async def append_history(self, msg: HistoryMessage) -> HistoryMessage:
+    async def add_message(self, msg: HistoryMessage) -> HistoryMessage:
         key = self._k("history", msg.session_id)
         await self._r.rpush(key, json.dumps(msg.model_dump()))
         await self._r.expire(key, self.ttl_sessions)

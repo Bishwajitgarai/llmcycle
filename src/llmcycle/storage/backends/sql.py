@@ -9,16 +9,17 @@ Required packages per DB:
   MSSQL:    pip install aioodbc
 """
 from __future__ import annotations
-import json
+import json, time as _time
 from typing import Optional, List, Any
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import Text, Float, Integer, Boolean, select, delete
+from sqlalchemy import Text, Float, Integer, Boolean, select, delete, update
 
 from llmcycle.storage.base import BaseStorage
 from llmcycle.storage.models import (
-    Workplace, Team, User, Session, LLMRequest, HistoryMessage
+    Workplace, Team, User, Session, LLMRequest, HistoryMessage,
+    ToolCall, RequestFeedback,
 )
 
 
@@ -78,29 +79,74 @@ class RequestRow(Base):
     id: Mapped[str]              = mapped_column(Text, primary_key=True)
     session_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True, index=True)
     user_id: Mapped[Optional[str]]    = mapped_column(Text, nullable=True, index=True)
-    model: Mapped[str]           = mapped_column(Text)
-    provider: Mapped[str]        = mapped_column(Text)
-    prompt: Mapped[str]          = mapped_column(Text, default="")
-    response: Mapped[str]        = mapped_column(Text, default="")
-    prompt_tokens: Mapped[int]   = mapped_column(Integer, default=0)
-    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    latency_ms: Mapped[float]    = mapped_column(Float, default=0.0)
-    status: Mapped[str]          = mapped_column(Text, default="success")
-    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    fallback_used: Mapped[bool]  = mapped_column(Boolean, default=False)
-    retries: Mapped[int]         = mapped_column(Integer, default=0)
-    created_at: Mapped[float]    = mapped_column(Float)
-    metadata_: Mapped[str]       = mapped_column("metadata", Text, default="{}")
+    team_id: Mapped[Optional[str]]    = mapped_column(Text, nullable=True, index=True)
+    workplace_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    parent_request_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    turn_number: Mapped[int]         = mapped_column(Integer, default=0)
+    model: Mapped[str]               = mapped_column(Text)
+    provider: Mapped[str]            = mapped_column(Text, default="")
+    prompt: Mapped[str]              = mapped_column(Text, default="")
+    response: Mapped[str]            = mapped_column(Text, default="")
+    prompt_tokens: Mapped[int]       = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int]   = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int]        = mapped_column(Integer, default=0)
+    latency_ms: Mapped[float]        = mapped_column(Float, default=0.0)
+    time_to_first_token_ms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    status: Mapped[str]              = mapped_column(Text, default="success", index=True)
+    error: Mapped[Optional[str]]     = mapped_column(Text, nullable=True)
+    fallback_used: Mapped[bool]      = mapped_column(Boolean, default=False)
+    retries: Mapped[int]             = mapped_column(Integer, default=0)
+    cancelled_at: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    timeout_ms: Mapped[Optional[float]]   = mapped_column(Float, nullable=True)
+    cost_usd: Mapped[Optional[float]]     = mapped_column(Float, nullable=True)
+    tags: Mapped[str]                = mapped_column(Text, default="[]")
+    has_tool_calls: Mapped[bool]     = mapped_column(Boolean, default=False)
+    is_cached: Mapped[bool]          = mapped_column(Boolean, default=False)
+    input_cost_per_1k: Mapped[Optional[float]]  = mapped_column(Float, nullable=True)
+    output_cost_per_1k: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    created_at: Mapped[float]        = mapped_column(Float, index=True)
+    metadata_: Mapped[str]           = mapped_column("metadata", Text, default="{}")
+
+class ToolCallRow(Base):
+    __tablename__ = "tool_calls"
+    id: Mapped[str]                   = mapped_column(Text, primary_key=True)
+    request_id: Mapped[str]           = mapped_column(Text, index=True)
+    session_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True, index=True)
+    user_id: Mapped[Optional[str]]    = mapped_column(Text, nullable=True)
+    name: Mapped[str]                 = mapped_column(Text)
+    arguments: Mapped[str]            = mapped_column(Text, default="{}")
+    arguments_raw: Mapped[str]        = mapped_column(Text, default="")
+    result: Mapped[Optional[str]]     = mapped_column(Text, nullable=True)
+    result_tokens: Mapped[int]        = mapped_column(Integer, default=0)
+    executed_at: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    status: Mapped[str]               = mapped_column(Text, default="pending", index=True)
+    error: Mapped[Optional[str]]      = mapped_column(Text, nullable=True)
+    created_at: Mapped[float]         = mapped_column(Float)
+    metadata_: Mapped[str]            = mapped_column("metadata", Text, default="{}")
+
+class FeedbackRow(Base):
+    __tablename__ = "feedback"
+    id: Mapped[str]                   = mapped_column(Text, primary_key=True)
+    request_id: Mapped[str]           = mapped_column(Text, index=True)
+    session_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    user_id: Mapped[Optional[str]]    = mapped_column(Text, nullable=True, index=True)
+    thumbs_up: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    rating: Mapped[Optional[int]]     = mapped_column(Integer, nullable=True)
+    comment: Mapped[Optional[str]]    = mapped_column(Text, nullable=True)
+    tags: Mapped[str]                 = mapped_column(Text, default="[]")
+    created_at: Mapped[float]         = mapped_column(Float)
+    metadata_: Mapped[str]            = mapped_column("metadata", Text, default="{}")
 
 class HistoryRow(Base):
     __tablename__ = "history"
-    id: Mapped[str]              = mapped_column(Text, primary_key=True)
-    session_id: Mapped[str]      = mapped_column(Text, index=True)
+    id: Mapped[str]                   = mapped_column(Text, primary_key=True)
+    session_id: Mapped[str]           = mapped_column(Text, index=True)
     request_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    role: Mapped[str]            = mapped_column(Text)
-    content: Mapped[str]         = mapped_column(Text)
-    created_at: Mapped[float]    = mapped_column(Float)
-    metadata_: Mapped[str]       = mapped_column("metadata", Text, default="{}")
+    role: Mapped[str]                 = mapped_column(Text)
+    content: Mapped[str]              = mapped_column(Text)
+    tool_call_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[float]         = mapped_column(Float)
+    metadata_: Mapped[str]            = mapped_column("metadata", Text, default="{}")
 
 
 # ─── Backend ──────────────────────────────────────────────────────────────────
@@ -363,7 +409,32 @@ class SQLStorage(BaseStorage):
     # ── Requests ─────────────────────────────────────────────────────
     async def save_request(self, req: LLMRequest) -> LLMRequest:
         async with self._s() as s:
-            s.add(RequestRow(id=req.id, session_id=req.session_id, user_id=req.user_id, model=req.model, provider=req.provider, prompt=req.prompt, response=req.response, prompt_tokens=req.prompt_tokens, completion_tokens=req.completion_tokens, latency_ms=req.latency_ms, status=req.status, error=req.error, fallback_used=req.fallback_used, retries=req.retries, created_at=req.created_at, metadata_=_j(req.metadata)))
+            s.add(RequestRow(
+                id=req.id, session_id=req.session_id,
+                user_id=req.user_id,
+                team_id=getattr(req, 'team_id', None),
+                workplace_id=getattr(req, 'workplace_id', None),
+                parent_request_id=getattr(req, 'parent_request_id', None),
+                turn_number=getattr(req, 'turn_number', 0),
+                model=req.model, provider=req.provider,
+                prompt=req.prompt, response=req.response,
+                prompt_tokens=req.prompt_tokens,
+                completion_tokens=req.completion_tokens,
+                total_tokens=getattr(req, 'total_tokens', req.prompt_tokens + req.completion_tokens),
+                latency_ms=req.latency_ms,
+                time_to_first_token_ms=getattr(req, 'time_to_first_token_ms', None),
+                status=req.status, error=req.error,
+                fallback_used=req.fallback_used, retries=req.retries,
+                cancelled_at=getattr(req, 'cancelled_at', None),
+                timeout_ms=getattr(req, 'timeout_ms', None),
+                cost_usd=getattr(req, 'cost_usd', None),
+                input_cost_per_1k=getattr(req, 'input_cost_per_1k', None),
+                output_cost_per_1k=getattr(req, 'output_cost_per_1k', None),
+                tags=_j(getattr(req, 'tags', [])),
+                has_tool_calls=getattr(req, 'has_tool_calls', False),
+                is_cached=getattr(req, 'is_cached', False),
+                created_at=req.created_at, metadata_=_j(req.metadata),
+            ))
             await s.commit()
         return req
 
@@ -380,21 +451,62 @@ class SQLStorage(BaseStorage):
             q = q.limit(limit).order_by(RequestRow.created_at.desc())
             return [self._req(r) for r in (await s.execute(q)).scalars().all()]
 
-    def _req(self, r: RequestRow) -> LLMRequest:
-        return LLMRequest(id=r.id, session_id=r.session_id, user_id=r.user_id, model=r.model, provider=r.provider, prompt=r.prompt, response=r.response, prompt_tokens=r.prompt_tokens, completion_tokens=r.completion_tokens, latency_ms=r.latency_ms, status=r.status, error=r.error, fallback_used=r.fallback_used, retries=r.retries, created_at=r.created_at, metadata=_u(r.metadata_))
+    def _req(self, r) -> LLMRequest:
+        return LLMRequest(
+            id=r.id, session_id=r.session_id,
+            user_id=r.user_id,
+            team_id=getattr(r, 'team_id', None),
+            workplace_id=getattr(r, 'workplace_id', None),
+            parent_request_id=getattr(r, 'parent_request_id', None),
+            turn_number=getattr(r, 'turn_number', 0),
+            model=r.model, provider=r.provider,
+            prompt=r.prompt, response=r.response,
+            prompt_tokens=r.prompt_tokens,
+            completion_tokens=r.completion_tokens,
+            total_tokens=getattr(r, 'total_tokens', 0),
+            latency_ms=r.latency_ms,
+            time_to_first_token_ms=getattr(r, 'time_to_first_token_ms', None),
+            status=r.status, error=r.error,
+            fallback_used=r.fallback_used, retries=r.retries,
+            cancelled_at=getattr(r, 'cancelled_at', None),
+            timeout_ms=getattr(r, 'timeout_ms', None),
+            cost_usd=getattr(r, 'cost_usd', None),
+            input_cost_per_1k=getattr(r, 'input_cost_per_1k', None),
+            output_cost_per_1k=getattr(r, 'output_cost_per_1k', None),
+            tags=_ul(getattr(r, 'tags', '[]')),
+            has_tool_calls=getattr(r, 'has_tool_calls', False),
+            is_cached=getattr(r, 'is_cached', False),
+            created_at=r.created_at, metadata=_u(r.metadata_),
+        )
 
     # ── History ──────────────────────────────────────────────────────
-    async def append_history(self, msg: HistoryMessage) -> HistoryMessage:
+    async def add_message(self, msg: HistoryMessage) -> HistoryMessage:
         async with self._s() as s:
-            s.add(HistoryRow(id=msg.id, session_id=msg.session_id, request_id=msg.request_id, role=msg.role, content=msg.content, created_at=msg.created_at, metadata_=_j(msg.metadata)))
+            s.add(HistoryRow(
+                id=msg.id, session_id=msg.session_id,
+                request_id=msg.request_id, role=msg.role,
+                content=msg.content,
+                tool_call_id=getattr(msg, 'tool_call_id', None),
+                created_at=msg.created_at, metadata_=_j(msg.metadata),
+            ))
             await s.commit()
         return msg
 
     async def get_history(self, session_id: str, limit=100) -> List[HistoryMessage]:
         async with self._s() as s:
-            q = select(HistoryRow).where(HistoryRow.session_id == session_id).order_by(HistoryRow.created_at).limit(limit)
+            q = (select(HistoryRow).where(HistoryRow.session_id == session_id)
+                 .order_by(HistoryRow.created_at).limit(limit))
             rows = (await s.execute(q)).scalars().all()
-            return [HistoryMessage(id=r.id, session_id=r.session_id, request_id=r.request_id, role=r.role, content=r.content, created_at=r.created_at, metadata=_u(r.metadata_)) for r in rows]
+            return [
+                HistoryMessage(
+                    id=r.id, session_id=r.session_id,
+                    request_id=r.request_id, role=r.role,
+                    content=r.content,
+                    tool_call_id=getattr(r, 'tool_call_id', None),
+                    created_at=r.created_at, metadata=_u(r.metadata_),
+                )
+                for r in rows
+            ]
 
     async def clear_history(self, session_id: str) -> None:
         async with self._s() as s:
@@ -447,3 +559,120 @@ class SQLStorage(BaseStorage):
             await s.commit()
 
         return {"deleted": deleted}
+
+    # ── Request lifecycle ────────────────────────────────────────────────
+    async def update_request_status(
+        self,
+        request_id: str,
+        status: str,
+        error: Optional[str] = None,
+        cancelled_at: Optional[float] = None,
+    ) -> None:
+        """Update status, error, cancelled_at on an existing request row."""
+        RR = getattr(self, "RequestRow", RequestRow)
+        vals = {"status": status}
+        if error        is not None: vals["error"]        = error
+        if cancelled_at is not None: vals["cancelled_at"] = cancelled_at
+        async with self._s() as s:
+            await s.execute(update(RR).where(RR.id == request_id).values(**vals))
+            await s.commit()
+
+    async def cancel_request(self, request_id: str) -> None:
+        """Shortcut: mark request as cancelled with current timestamp."""
+        await self.update_request_status(
+            request_id, status="cancelled", cancelled_at=_time.time()
+        )
+
+    # ── Tool calls ───────────────────────────────────────────────────────
+    async def save_tool_call(self, tc: ToolCall) -> ToolCall:
+        TCR = getattr(self, "ToolCallRow", ToolCallRow)
+        async with self._s() as s:
+            s.add(TCR(
+                id=tc.id, request_id=tc.request_id,
+                session_id=tc.session_id, user_id=tc.user_id,
+                name=tc.name, arguments=_j(tc.arguments),
+                arguments_raw=tc.arguments_raw,
+                result=tc.result, result_tokens=tc.result_tokens,
+                executed_at=tc.executed_at, status=tc.status,
+                error=tc.error, created_at=tc.created_at,
+                metadata_=_j(tc.metadata),
+            ))
+            await s.commit()
+        return tc
+
+    async def update_tool_call(self, tc: ToolCall) -> ToolCall:
+        TCR = getattr(self, "ToolCallRow", ToolCallRow)
+        async with self._s() as s:
+            row = await s.get(TCR, tc.id)
+            if row:
+                row.result        = tc.result
+                row.result_tokens = tc.result_tokens
+                row.executed_at   = tc.executed_at
+                row.status        = tc.status
+                row.error         = tc.error
+                row.metadata_     = _j(tc.metadata)
+                await s.commit()
+        return tc
+
+    async def list_tool_calls(
+        self,
+        request_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[ToolCall]:
+        TCR = getattr(self, "ToolCallRow", ToolCallRow)
+        async with self._s() as s:
+            q = select(TCR)
+            if request_id: q = q.where(TCR.request_id == request_id)
+            if session_id: q = q.where(TCR.session_id == session_id)
+            if status:     q = q.where(TCR.status == status)
+            q = q.limit(limit).order_by(TCR.created_at.desc())
+            rows = (await s.execute(q)).scalars().all()
+            return [ToolCall(
+                id=r.id, request_id=r.request_id,
+                session_id=r.session_id, user_id=r.user_id,
+                name=r.name, arguments=_u(r.arguments),
+                arguments_raw=r.arguments_raw,
+                result=r.result, result_tokens=r.result_tokens,
+                executed_at=r.executed_at, status=r.status,
+                error=r.error, created_at=r.created_at,
+                metadata=_u(r.metadata_),
+            ) for r in rows]
+
+    # ── Feedback ─────────────────────────────────────────────────────────
+    async def save_feedback(self, fb: RequestFeedback) -> RequestFeedback:
+        FR = getattr(self, "FeedbackRow", FeedbackRow)
+        async with self._s() as s:
+            s.add(FR(
+                id=fb.id, request_id=fb.request_id,
+                session_id=fb.session_id, user_id=fb.user_id,
+                thumbs_up=fb.thumbs_up, rating=fb.rating,
+                comment=fb.comment, tags=_j(fb.tags),
+                created_at=fb.created_at, metadata_=_j(fb.metadata),
+            ))
+            await s.commit()
+        return fb
+
+    async def list_feedback(
+        self,
+        request_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[RequestFeedback]:
+        FR = getattr(self, "FeedbackRow", FeedbackRow)
+        async with self._s() as s:
+            q = select(FR)
+            if request_id: q = q.where(FR.request_id == request_id)
+            if user_id:    q = q.where(FR.user_id == user_id)
+            if session_id: q = q.where(FR.session_id == session_id)
+            q = q.limit(limit).order_by(FR.created_at.desc())
+            rows = (await s.execute(q)).scalars().all()
+            return [RequestFeedback(
+                id=r.id, request_id=r.request_id,
+                session_id=r.session_id, user_id=r.user_id,
+                thumbs_up=r.thumbs_up, rating=r.rating,
+                comment=r.comment, tags=_ul(r.tags),
+                created_at=r.created_at, metadata=_u(r.metadata_),
+            ) for r in rows]
