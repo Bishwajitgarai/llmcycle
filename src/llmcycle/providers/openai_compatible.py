@@ -55,7 +55,7 @@ class OpenAICompatibleProvider(LLMProvider):
                     if "data" in data:
                         return sorted(m["id"] for m in data["data"])
                     if "models" in data:
-                        return sorted(m.get("id", m) for m in data["models"])
+                        return sorted((m.get("id") if isinstance(m, dict) else m) for m in data["models"])
                 logger.warning(f"[{self.provider_name}] /models returned {resp.status_code}")
                 return []
             except Exception as e:

@@ -222,6 +222,14 @@ models = await client.get_models("groq")
 print(models)  # ['llama-3.1-70b-versatile', 'mixtral-8x7b-32768', ...]
 ```
 
+### Fetch all live models in parallel
+
+```python
+# Fetches all dynamic live models across all active providers in parallel
+all_models = await client.get_all_live_models()
+# → {"openai": ["gpt-4o", ...], "groq": ["llama-3.1-70b", ...]}
+```
+
 ### Non-streaming completion
 
 ```python
@@ -603,10 +611,54 @@ response = await client.complete(
 
 ---
 
+### 4. Multimodal Attachments 📎
+
+Run multimodal queries with zero-copy or automated cloud offloading. Simply pass PDF, image, audio, or video files into `attachments`.
+
+* **How it works:** Defaults to `local` storage. Saves files to a local directory (for caching/record-keeping) and automatically encodes them as standard Base64 Data URL payloads.
+* **AWS S3 Offloading:** Need cloud-based file serving for models that require URL inputs? Switch `attachment_storage` to `"s3"`. Files are automatically uploaded using dynamic `boto3` integration, returning secure, pre-signed URLs valid for 1 hour.
+
+```python
+from llmcycle import LLMCycle
+
+# Local attachments storage
+client = LLMCycle(
+    attachment_storage="local",
+    attachment_config={
+        "local_dir": "./saved_attachments"  # Where local copies are saved
+    }
+)
+
+# Call complete or stream with attachments
+response = await client.complete(
+    model="openai/gpt-4o-mini",
+    prompt="Explain the core problem in this document and look at this image.",
+    attachments=[
+        "./documents/audit_report.pdf",
+        "./images/system_architecture.png"
+    ]
+)
+print(response.content)
+
+# AWS S3-backed attachments (zero mandatory external dependencies)
+client_s3 = LLMCycle(
+    attachment_storage="s3",
+    attachment_config={
+        "s3_bucket": "my-llmcycle-attachments",
+        "s3_prefix": "runs/attachments/",       # Optional, default: "attachments/"
+        "s3_region": "us-west-2"                 # Optional, default: "us-east-1"
+    }
+)
+```
+
+---
+
 ## 🚀 CLI
 
 ```bash
 llmcycle providers           # List all loaded providers + key health
+llmcycle models              # Fetch and list all dynamic live models across providers in parallel
+llmcycle models groq         # Fetch and list live models for a specific provider
 llmcycle ui                  # Start dashboard on http://127.0.0.1:8000
 ```
 

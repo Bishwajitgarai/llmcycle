@@ -214,6 +214,50 @@ def cmd_list(_args) -> None:
     print()
 
 
+def cmd_models(args) -> None:
+    import asyncio
+    from llmcycle import LLMCycle
+
+    _safe_load_env()
+    client = LLMCycle()
+
+    if args.provider:
+        p_name = args.provider.lower()
+        if p_name not in client.get_providers():
+            print(_c(f"  Error: provider '{args.provider}' is not loaded or has no API keys.", RED))
+            return
+        print(f"\n{_c(f'Fetching live models for {p_name}...', BOLD)}\n")
+        try:
+            models = asyncio.run(client.get_models(p_name))
+            if not models:
+                print(_c("  No models returned or provider has no active keys.", YELLOW))
+            else:
+                for m in models:
+                    print(f"  {_c('•', GREEN)}  {_c(m, BOLD)}")
+                print(f"\n  Total: {_c(str(len(models)), GREEN)} model(s)\n")
+        except Exception as e:
+            print(_c(f"  Error fetching models: {e}", RED))
+    else:
+        print(f"\n{_c('Fetching all live models across configured providers...', BOLD)}\n")
+        try:
+            results = asyncio.run(client.get_all_live_models())
+            if not results:
+                print(_c("  No providers loaded. Add keys using 'llmcycle keys add <provider> <key>'.", YELLOW))
+                return
+            for p, models in results.items():
+                p_hdr = f"  {_c(p, BOLD, CYAN)} ({len(models)} models)"
+                print(p_hdr)
+                print("  " + "—" * 40)
+                if not models:
+                    print(_c("    (No active models or failed to connect)", DIM))
+                else:
+                    for m in sorted(models):
+                        print(f"    {_c('•', GREEN)}  {m}")
+                print()
+        except Exception as e:
+            print(_c(f"  Error: {e}", RED))
+
+
 def cmd_ping(args) -> None:
     import asyncio, time
     from llmcycle import LLMCycle
@@ -480,6 +524,11 @@ def main() -> None:
     ping_p.add_argument("provider", nargs="?", default=None,
                         help="Provider name (omit to ping all)")
 
+    # models
+    models_p = sub.add_parser("models", help="Fetch and list dynamic live models across configured providers")
+    models_p.add_argument("provider", nargs="?", default=None,
+                          help="Provider name (omit to show models for all)")
+
     # config
     sub.add_parser("config", help="Show active configuration (includes cache info)")
 
@@ -540,6 +589,9 @@ def main() -> None:
 
     elif args.command == "ping":
         cmd_ping(args)
+
+    elif args.command == "models":
+        cmd_models(args)
 
     elif args.command == "config":
         cmd_config(args)

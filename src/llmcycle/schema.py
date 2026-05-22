@@ -8,7 +8,7 @@ import time
 
 class Message(BaseModel):
     role: str
-    content: str
+    content: Union[str, List[Dict[str, Any]]]
 
 class CompletionRequest(BaseModel):
     model: str

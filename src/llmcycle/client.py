@@ -168,6 +168,9 @@ class LLMCycle:
         rate_limits: Optional[Union[bool, Dict[str, Dict[str, int]]]] = False,
         # Guardrails
         guardrail: Optional[Union[bool, Any]] = False,
+        # Attachment Storage integration
+        attachment_storage: Optional[str] = None,
+        attachment_config: Optional[dict] = None,
     ):
         logging.basicConfig(level=getattr(logging, log_level.upper(), logging.WARNING))
 
@@ -198,6 +201,14 @@ class LLMCycle:
         self.user_id      = user_id
         self.team_id      = team_id
         self.workplace_id = workplace_id
+
+        # ── Attachment Storage ──────────────────────────────────────────────────
+        from llmcycle.core.attachments import AttachmentManager
+        att_cfg = attachment_config or {}
+        self.attachment_manager = AttachmentManager(
+            storage_type=attachment_storage,
+            **att_cfg
+        )
 
         # ── Budget ─────────────────────────────────────────────────────────────
         self.max_cost_usd    = max_cost_usd
@@ -290,6 +301,19 @@ class LLMCycle:
             return []
         return await self._providers[p].get_models(key)
 
+    async def get_all_live_models(self) -> Dict[str, List[str]]:
+        """Fetch all dynamic live models across all configured providers in parallel."""
+        providers = self.get_providers()
+        tasks = {p: self.get_models(p) for p in providers}
+        results = {}
+        for p, fut in zip(tasks.keys(), await asyncio.gather(*tasks.values(), return_exceptions=True)):
+            if isinstance(fut, Exception):
+                logger.warning(f"Failed to fetch live models for {p}: {fut}")
+                results[p] = []
+            else:
+                results[p] = fut
+        return results
+
     def get_key_stats(self, provider: str) -> List[dict]:
         return self.key_manager.get_stats(provider)
 
@@ -345,6 +369,24 @@ class LLMCycle:
 
     # ─── Context window helpers ───────────────────────────────────────────────
 
+    def _get_content_text(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") == "text":
+                        parts.append(part.get("text", ""))
+                    elif part.get("type") == "image_url":
+                        parts.append("[Image Attachment]")
+                    elif part.get("type") == "input_audio":
+                        parts.append("[Audio Attachment]")
+                    elif part.get("type") == "document":
+                        parts.append("[Document Attachment]")
+            return "".join(parts)
+        return ""
+
     def _estimate_tokens(self, text: str) -> int:
         """Rough token estimate: ~4 chars per token."""
         return max(1, len(text) // 4)
@@ -358,7 +400,7 @@ class LLMCycle:
         if not limit:
             return messages
 
-        total = sum(self._estimate_tokens(m.get("content", "")) for m in messages)
+        total = sum(self._estimate_tokens(self._get_content_text(m.get("content", ""))) for m in messages)
         if total + reserve <= limit:
             return messages
 
@@ -368,10 +410,10 @@ class LLMCycle:
         non_system = [m for m in messages if m.get("role") != "system"]
 
         # Add non-system from the end (most recent first)
-        budget = limit - reserve - sum(self._estimate_tokens(m.get("content", "")) for m in system)
+        budget = limit - reserve - sum(self._estimate_tokens(self._get_content_text(m.get("content", ""))) for m in system)
         kept = []
         for m in reversed(non_system):
-            t = self._estimate_tokens(m.get("content", ""))
+            t = self._estimate_tokens(self._get_content_text(m.get("content", "")))
             if budget - t >= 0:
                 kept.insert(0, m)
                 budget -= t
@@ -442,6 +484,7 @@ class LLMCycle:
         tags: Optional[List[str]] = None,
         parent_request_id: Optional[str] = None,
         turn_number: int = 0,
+        attachments: Optional[List[Union[str, bytes, dict]]] = None,
         **kwargs,
     ) -> CompletionResponse:
         """
@@ -456,27 +499,60 @@ class LLMCycle:
             turn_number:        Which turn in an agentic loop (0 = first user turn).
             timeout:            Raise asyncio.TimeoutError after N seconds.
             tags:               Labels saved with the storage record.
+            attachments:        Optional list of documents, audio, video, or image attachments.
         """
         model = self._resolve_model(model)
 
         if messages is None:
             if prompt is None:
                 raise ValueError("Provide either 'prompt' or 'messages'.")
-            messages = [{"role": "user", "content": prompt}]
+            if attachments:
+                messages = [{"role": "user", "content": self.attachment_manager.format_message_content(prompt, attachments)}]
+            else:
+                messages = [{"role": "user", "content": prompt}]
+        elif attachments:
+            # Attach to the last user message in the message list
+            # Find the last message with role "user"
+            messages = [dict(m) for m in messages]  # Make a copy to avoid side-effects
+            user_msg_idx = None
+            for idx in range(len(messages) - 1, -1, -1):
+                if messages[idx].get("role") == "user":
+                    user_msg_idx = idx
+                    break
+            if user_msg_idx is not None:
+                current_content = messages[user_msg_idx].get("content", "")
+                messages[user_msg_idx]["content"] = self.attachment_manager.format_message_content(
+                    self._get_content_text(current_content),
+                    attachments
+                )
+            else:
+                messages.append({"role": "user", "content": self.attachment_manager.format_message_content("", attachments)})
 
         # Rate Limit check
         if self.rate_limit_manager:
-            prompt_text = prompt or "".join(m.get("content", "") for m in messages)
+            prompt_text = prompt or "".join(self._get_content_text(m.get("content", "")) for m in messages)
             est_tokens = self._estimate_tokens(prompt_text)
             await self.rate_limit_manager.get_limiter(model).acquire(est_tokens)
 
         # Guardrails: Mask prompt/messages in-flight
         if self.guardrail:
             if messages:
-                messages = [
-                    {**m, "content": self.guardrail.mask_prompt(m["content"])}
-                    for m in messages
-                ]
+                new_messages = []
+                for m in messages:
+                    c = m.get("content")
+                    if isinstance(c, str):
+                        new_messages.append({**m, "content": self.guardrail.mask_prompt(c)})
+                    elif isinstance(c, list):
+                        new_parts = []
+                        for part in c:
+                            if isinstance(part, dict) and part.get("type") == "text":
+                                new_parts.append({**part, "text": self.guardrail.mask_prompt(part.get("text", ""))})
+                            else:
+                                new_parts.append(part)
+                        new_messages.append({**m, "content": new_parts})
+                    else:
+                        new_messages.append(m)
+                messages = new_messages
             if prompt:
                 prompt = self.guardrail.mask_prompt(prompt)
 
@@ -611,6 +687,7 @@ class LLMCycle:
         tags: Optional[List[str]] = None,
         parent_request_id: Optional[str] = None,
         turn_number: int = 0,
+        attachments: Optional[List[Union[str, bytes, dict]]] = None,
         **kwargs,
     ) -> AsyncGenerator[str, None]:
         """
@@ -626,21 +703,53 @@ class LLMCycle:
         if messages is None:
             if prompt is None:
                 raise ValueError("Provide either 'prompt' or 'messages'.")
-            messages = [{"role": "user", "content": prompt}]
+            if attachments:
+                messages = [{"role": "user", "content": self.attachment_manager.format_message_content(prompt, attachments)}]
+            else:
+                messages = [{"role": "user", "content": prompt}]
+        elif attachments:
+            # Attach to the last user message in the message list
+            # Find the last message with role "user"
+            messages = [dict(m) for m in messages]  # Make a copy to avoid side-effects
+            user_msg_idx = None
+            for idx in range(len(messages) - 1, -1, -1):
+                if messages[idx].get("role") == "user":
+                    user_msg_idx = idx
+                    break
+            if user_msg_idx is not None:
+                current_content = messages[user_msg_idx].get("content", "")
+                messages[user_msg_idx]["content"] = self.attachment_manager.format_message_content(
+                    self._get_content_text(current_content),
+                    attachments
+                )
+            else:
+                messages.append({"role": "user", "content": self.attachment_manager.format_message_content("", attachments)})
 
         # Rate Limit check
         if self.rate_limit_manager:
-            prompt_text = prompt or "".join(m.get("content", "") for m in messages)
+            prompt_text = prompt or "".join(self._get_content_text(m.get("content", "")) for m in messages)
             est_tokens = self._estimate_tokens(prompt_text)
             await self.rate_limit_manager.get_limiter(model).acquire(est_tokens)
 
         # Guardrails: Mask prompt/messages in-flight
         if self.guardrail:
             if messages:
-                messages = [
-                    {**m, "content": self.guardrail.mask_prompt(m["content"])}
-                    for m in messages
-                ]
+                new_messages = []
+                for m in messages:
+                    c = m.get("content")
+                    if isinstance(c, str):
+                        new_messages.append({**m, "content": self.guardrail.mask_prompt(c)})
+                    elif isinstance(c, list):
+                        new_parts = []
+                        for part in c:
+                            if isinstance(part, dict) and part.get("type") == "text":
+                                new_parts.append({**part, "text": self.guardrail.mask_prompt(part.get("text", ""))})
+                            else:
+                                new_parts.append(part)
+                        new_messages.append({**m, "content": new_parts})
+                    else:
+                        new_messages.append(m)
+                messages = new_messages
             if prompt:
                 prompt = self.guardrail.mask_prompt(prompt)
 
