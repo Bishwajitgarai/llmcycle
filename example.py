@@ -1,58 +1,70 @@
 import asyncio
-from llmcycle.core.keys import KeyManager
-from llmcycle.core.router import ModelRouter, FallbackRouter
-from llmcycle.core.stream import StreamResilienceManager
-from llmcycle.schema import CompletionRequest, Message
-from llmcycle.providers.base import LLMProvider
-from typing import AsyncGenerator
-
-class MockProvider(LLMProvider):
-    """A mock provider that fails midway through the stream to test resilience."""
-    def __init__(self, should_fail: bool):
-        self.should_fail = should_fail
-        
-    async def generate(self, request: CompletionRequest, api_key: str) -> str:
-        return "Hello World"
-        
-    async def generate_stream(self, request: CompletionRequest, api_key: str) -> AsyncGenerator[str, None]:
-        chunks = ["Hello", " world", ",", " how", " are", " you?"]
-        for i, chunk in enumerate(chunks):
-            if self.should_fail and i == 3:
-                raise ConnectionError("Mock streaming disconnect")
-            yield chunk
-            await asyncio.sleep(0.1)
-            
-    async def get_models(self, api_key: str) -> list[str]:
-        return ["gpt-4", "gpt-4-turbo"]
+from llmcycle import LLMCycle
+from llmcycle.core.router import RoutingStrategy
 
 async def main():
-    print("Setting up LLMCycle Manager...")
-    km = KeyManager()
-    km.add_key("gpt-4-turbo", "sk-mock-1")
-    km.add_key("gpt-4", "sk-mock-2")
-    
-    router = ModelRouter(FallbackRouter({"gpt-4-turbo": ["gpt-4"]}))
-    
-    providers = {
-        "gpt-4-turbo": MockProvider(should_fail=True),
-        "gpt-4": MockProvider(should_fail=False)
-    }
-    
-    stream_manager = StreamResilienceManager(router, km, providers)
-    
-    request = CompletionRequest(
-        model="gpt-4-turbo",
-        messages=[Message(role="user", content="Say hello!")]
+    print("=" * 60)
+    print("  LLMCycle - Production Example")
+    print("=" * 60)
+
+    # ─── 1. Init ────────────────────────────────────────────────
+    # Auto-loads OPENAI_API_KEYS, DEEPSEEK_API_KEYS, GROQ_API_KEYS, etc. from .env
+    client = LLMCycle(
+        env_path=".env",
+        fallbacks={
+            # If deepseek fails or gets rate-limited → try groq, then openai
+            "deepseek":                 ["groq", "openai"],
+            "deepseek/deepseek-chat":   ["groq/llama-3.1-70b-versatile", "openai/gpt-4o-mini"],
+        },
+        strategy=RoutingStrategy.PRIORITY,
+        log_level="INFO",
     )
-    
-    print("\nStarting robust stream...")
-    try:
-        async for chunk in stream_manager.safe_stream(request):
-            print(chunk, end="", flush=True)
-    except Exception as e:
-        print(f"\nStream failed completely: {e}")
-        
-    print("\n\nFinished stream successfully, even with mid-stream disconnect!")
+
+    # ─── 2. List providers ───────────────────────────────────────
+    providers = client.get_providers()
+    print(f"\n✅ Loaded providers: {providers}")
+
+    for p in providers:
+        stats = client.key_manager.key_count(p)
+        print(f"   [{p}] keys: {stats['active']}/{stats['total']} active")
+
+    # ─── 3. Get models from a provider ──────────────────────────
+    if providers:
+        p = providers[0]
+        print(f"\n📋 Fetching models for '{p}'...")
+        models = await client.get_models(p)
+        if models:
+            print(f"   {models[:5]} ... ({len(models)} total)")
+        else:
+            print(f"   (Could not fetch models — check API key)")
+
+    # ─── 4. Non-streaming completion ────────────────────────────
+    if providers:
+        print("\n💬 Non-streaming completion (with fallback routing)...")
+        try:
+            resp = await client.complete(
+                model=f"{providers[0]}/gpt-4o-mini",
+                prompt="Say 'Hello from LLMCycle!' in exactly 5 words.",
+            )
+            print(f"   [{resp.provider}] {resp.content} ({resp.latency_ms:.0f}ms)")
+        except Exception as e:
+            print(f"   Error: {e}")
+
+    # ─── 5. Streaming completion ─────────────────────────────────
+    if providers:
+        print("\n🌊 Streaming completion (resilient mid-stream failover)...")
+        try:
+            print("   ", end="", flush=True)
+            async for chunk in client.stream(
+                model=f"{providers[0]}/gpt-4o-mini",
+                prompt="Count from 1 to 5 with a short fact about each number.",
+            ):
+                print(chunk, end="", flush=True)
+            print()
+        except Exception as e:
+            print(f"\n   Stream error: {e}")
+
+    print("\n✅ Done.")
 
 if __name__ == "__main__":
     asyncio.run(main())
