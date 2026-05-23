@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from llmcycle.core.keys import KeyManager, KeyStatus
 from llmcycle.core.router import ModelRouter, RoutingStrategy
 from llmcycle.core.stream import StreamResilienceManager, RetryPolicy
+from llmcycle.utils import parse_model
 from llmcycle.core.errors import (
     RateLimitError, AuthenticationError, QuotaExceededError,
     ContentPolicyError, ProviderError, AllProvidersFailedError,
@@ -149,9 +150,9 @@ class TestModelRouter:
         assert router.latency.get("groq") < router.latency.get("openai")
 
     def test_parse_model_string(self):
-        assert ModelRouter._parse("openai/gpt-4o") == ("openai", "gpt-4o")
-        assert ModelRouter._parse("gpt-4o") == ("gpt-4o", "gpt-4o")
-        assert ModelRouter._parse("groq") == ("groq", "groq")
+        assert parse_model("openai/gpt-4o") == ("openai", "gpt-4o")
+        assert parse_model("gpt-4o") == ("gpt-4o", "gpt-4o")
+        assert parse_model("groq") == ("groq", "groq")
 
 
 # ─── Error Classification Tests ───────────────────────────────────────────────

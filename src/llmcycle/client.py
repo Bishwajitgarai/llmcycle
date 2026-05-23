@@ -4,18 +4,24 @@ LLMCycle Client - All-in-One LLM Interface
 Features:
   - Auto-discovers providers from .env (*_API_KEYS pattern)
   - Multi-key rotation with per-key health tracking
-  - Smart routing: Priority / Round-Robin / Lowest-Latency
+  - Smart routing: Priority / Round-Robin / Lowest-Latency / Cost-Optimized
   - Resilient streaming with mid-stream failover
   - Timeout + cancellation tracking (status: success/error/cancelled/timeout)
   - Auto-save to storage with session/user/team/tags
   - Model aliases (map "fast" → "groq/llama-3-70b")
-  - Prompt caching (in-memory with TTL, deduplicates identical prompts)
-  - Structured output (parse LLM response into a Pydantic model)
+  - Prompt caching (in-memory / semantic similarity with TTL)
+  - Structured output (tool-calling API by default, JSON-prompt fallback)
   - Agentic tool-calling loop with max_tool_calls guard
   - Budget enforcement (raises BudgetExceededError if cost_usd exceeded)
   - Context window auto-trim (truncate messages to fit model limits)
-  - Request/response middleware hooks (on_before / on_after)
+  - Request/response middleware hooks (on_before / on_after / on_trace)
   - Parallel batch completions with concurrency control
+  - Prompt injection & jailbreak guard (InjectionGuard)
+  - Shadow routing / dark launching (shadow_models on complete)
+  - Response validation with auto-retry (validators on complete)
+  - Prompt registry with versioned templates (PromptRegistry)
+  - Semantic caching (TF-IDF cosine similarity)
+  - Secret manager adapters (Env / AWS / GCP / Vault)
 """
 from __future__ import annotations
 import asyncio
@@ -39,8 +45,12 @@ from llmcycle.core.errors import (
     MaxToolCallsExceededError, BudgetExceededError,
     StructuredOutputError,
 )
+from llmcycle.core.injection import InjectionGuard, InjectionBlockedError
+from llmcycle.core.prompts import PromptRegistry
+from llmcycle.core.semantic_cache import SemanticCache
 from llmcycle.providers.openai_compatible import OpenAICompatibleProvider
 from llmcycle.providers.registry import PROVIDER_REGISTRY
+from llmcycle.utils import parse_model
 
 logger = logging.getLogger(__name__)
 
@@ -163,11 +173,14 @@ class LLMCycle:
         context_windows: Optional[Dict[str, int]] = None,
         auto_trim_context: bool = True,    # auto-truncate messages if over context limit
         # Caching layer
-        cache: Optional[Union[bool, BaseCache]] = False, # Pluggable prompt cache
+        cache: Optional[Union[bool, BaseCache]] = False,  # Pluggable prompt cache
+        semantic_cache: Optional[Union[bool, SemanticCache]] = False,  # Semantic similarity cache
         # Rate limits
         rate_limits: Optional[Union[bool, Dict[str, Dict[str, int]]]] = False,
         # Guardrails
         guardrail: Optional[Union[bool, Any]] = False,
+        # Prompt injection / jailbreak protection
+        injection_guard: Optional[Union[bool, InjectionGuard]] = False,
         # Attachment Storage integration
         attachment_storage: Optional[str] = None,
         attachment_config: Optional[dict] = None,
@@ -197,14 +210,12 @@ class LLMCycle:
         self.key_manager  = KeyManager()
         self._providers: Dict[str, OpenAICompatibleProvider] = {}
 
-        # ── Storage ────────────────────────────────────────────────────────────
         self.storage      = storage
         self.session_id   = session_id
         self.user_id      = user_id
         self.team_id      = team_id
         self.workplace_id = workplace_id
 
-        # ── Attachment Storage ──────────────────────────────────────────────────
         from llmcycle.core.attachments import AttachmentManager
         att_cfg = attachment_config or {}
         self.attachment_manager = AttachmentManager(
@@ -212,27 +223,22 @@ class LLMCycle:
             **att_cfg
         )
 
-        # ── Budget & Proxy ──────────────────────────────────────────────────────
         self.max_cost_usd    = max_cost_usd
         self._total_cost_usd = 0.0         # accumulated cost this session
         self.proxy           = proxy
 
-        # ── Pricing / context ──────────────────────────────────────────────────
         self.pricing         = {**DEFAULT_PRICING, **(pricing or {})}
         self.context_windows = {**DEFAULT_CONTEXT_WINDOWS, **(context_windows or {})}
         self.auto_trim_context = auto_trim_context
 
-        # ── Aliases  (name → "provider/model") ────────────────────────────────
         self._aliases: Dict[str, str] = {}
 
-        # ── Prompt cache ──────────────────────────────────────────────────────
         self._cache = None
         if cache is True:
             self._cache = InMemoryCache()
         elif cache:
             self._cache = cache
 
-        # ── Rate limiting ──────────────────────────────────────────────────────
         self.rate_limit_manager = None
         if rate_limits is True:
             from llmcycle.core.rate_limit import RateLimitManager
@@ -241,7 +247,6 @@ class LLMCycle:
             from llmcycle.core.rate_limit import RateLimitManager
             self.rate_limit_manager = RateLimitManager(rate_limits)
 
-        # ── Guardrails ─────────────────────────────────────────────────────────
         self.guardrail = None
         if guardrail is True:
             from llmcycle.core.guardrail import GuardrailManager
@@ -249,17 +254,32 @@ class LLMCycle:
         elif guardrail:
             self.guardrail = guardrail
 
-        # ── Middleware hooks ───────────────────────────────────────────────────
-        # Set these to callables:
-        #   client.on_before = async def hook(model, messages, kwargs): ...
-        #   client.on_after  = async def hook(model, response): ...
-        #   client.on_error  = async def hook(model, exception): ...
+        self.injection_guard: Optional[InjectionGuard] = None
+        if injection_guard is True:
+            self.injection_guard = InjectionGuard()
+        elif injection_guard:
+            self.injection_guard = injection_guard
+
+        self._semantic_cache: Optional[SemanticCache] = None
+        if semantic_cache is True:
+            self._semantic_cache = SemanticCache()
+        elif semantic_cache:
+            self._semantic_cache = semantic_cache
+
+        self.prompts = PromptRegistry()
+
+        # Set client.on_before / on_after / on_error / on_trace to async callables:
+        #   async def hook(model, messages, kwargs): ...  # on_before
+        #   async def hook(model, response): ...          # on_after
+        #   async def hook(model, exception): ...         # on_error
+        #   async def hook(trace: dict): ...              # on_trace  (OTel-compatible)
         self.on_before: Optional[Callable] = None
         self.on_after:  Optional[Callable] = None
         self.on_error:  Optional[Callable] = None
+        self.on_trace:  Optional[Callable] = None
 
         self._auto_load_from_env()
-        self.router      = ModelRouter(fallbacks=fallbacks or {}, strategy=strategy)
+        self.router      = ModelRouter(fallbacks=fallbacks or {}, strategy=strategy, pricing=self.pricing)
         self._stream_mgr = StreamResilienceManager(self.router, self.key_manager, self._providers)
 
     # ─── Auto-discovery ──────────────────────────────────────────────────────
@@ -399,7 +419,7 @@ class LLMCycle:
         Auto-trim messages to fit within the model's context window.
         Keeps system message + most recent messages. Removes oldest turns first.
         """
-        limit = self.context_windows.get(model.split("/")[-1], 0)
+        limit = self.context_windows.get(parse_model(model)[1], 0)
         if not limit:
             return messages
 
@@ -488,6 +508,8 @@ class LLMCycle:
         parent_request_id: Optional[str] = None,
         turn_number: int = 0,
         attachments: Optional[List[Union[str, bytes, dict]]] = None,
+        shadow_models: Optional[List[str]] = None,
+        validators: Optional[List[Callable]] = None,
         **kwargs,
     ) -> CompletionResponse:
         """
@@ -503,6 +525,12 @@ class LLMCycle:
             timeout:            Raise asyncio.TimeoutError after N seconds.
             tags:               Labels saved with the storage record.
             attachments:        Optional list of documents, audio, video, or image attachments.
+            shadow_models:      Fire-and-forget completions on these models in parallel
+                                (dark launching / A/B). Results are logged only.
+            validators:         List of callables (sync or async) — each receives
+                                (model, response) and raises on failure. On validator
+                                failure the call behaves as an error (no retry via
+                                shadow_models but surfaces the ValidationError).
         """
         model = self._resolve_model(model)
 
@@ -530,6 +558,25 @@ class LLMCycle:
                 )
             else:
                 messages.append({"role": "user", "content": self.attachment_manager.format_message_content("", attachments)})
+
+        if self.injection_guard:
+            prompt_text_for_guard = prompt or "".join(
+                self._get_content_text(m.get("content", ""))
+                for m in (messages or [])
+                if m.get("role") == "user"
+            )
+            result = self.injection_guard.scan(prompt_text_for_guard)
+            if result.blocked:
+                raise InjectionBlockedError(result)
+
+        if self._semantic_cache and (prompt or messages):
+            _sc_query = prompt or " ".join(
+                self._get_content_text(m.get("content", "")) for m in messages
+            )
+            _sc_hit = await self._semantic_cache.get(_sc_query)
+            if _sc_hit:
+                logger.debug(f"Semantic cache hit for model={model}")
+                return _sc_hit
 
         # Rate Limit check
         if self.rate_limit_manager:
@@ -612,6 +659,36 @@ class LLMCycle:
             if response and response.content and self.guardrail:
                 response.content = self.guardrail.unmask_response(response.content)
 
+            if validators and response:
+                for validator in validators:
+                    try:
+                        result = validator(model, response)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception as ve:
+                        logger.warning(f"Response validator {validator.__name__!r} failed: {ve}")
+                        raise
+
+            if shadow_models and response:
+                async def _shadow_call(shadow_model: str, _msgs: list, _kw: dict):
+                    try:
+                        shadow_resp = await self.complete(
+                            shadow_model, messages=_msgs, **_kw
+                        )
+                        logger.info(
+                            f"[Shadow] model={shadow_model} "
+                            f"tokens={shadow_resp.prompt_tokens}+{shadow_resp.completion_tokens} "
+                            f"latency={shadow_resp.latency_ms:.0f}ms"
+                        )
+                    except Exception as se:
+                        logger.warning(f"[Shadow] model={shadow_model} failed: {se}")
+
+                _shadow_kw = {k: v for k, v in kwargs.items()}
+                for _sm in shadow_models:
+                    asyncio.ensure_future(
+                        _shadow_call(self._resolve_model(_sm), list(messages), _shadow_kw)
+                    )
+
             # After hook
             if self.on_after:
                 try:
@@ -669,6 +746,39 @@ class LLMCycle:
         # Cache the response
         if cache_key and response:
             await self._cache_set(cache_key, response, cache_ttl)
+
+        # Semantic cache: store on success
+        if self._semantic_cache and response and status == "success":
+            _sc_store_query = prompt or " ".join(
+                self._get_content_text(m.get("content", "")) for m in messages
+            )
+            await self._semantic_cache.set(_sc_store_query, response)
+
+        if self.on_trace and response:
+            try:
+                trace_span = {
+                    "name":               "llmcycle.complete",
+                    "model":              model,
+                    "provider":           getattr(response, "provider", ""),
+                    "status":             status,
+                    "latency_ms":         round((_time.monotonic() - t0) * 1000, 2),
+                    "prompt_tokens":      getattr(response, "prompt_tokens", 0),
+                    "completion_tokens":  getattr(response, "completion_tokens", 0),
+                    "cost_usd":           self._estimate_cost(
+                        model,
+                        getattr(response, "prompt_tokens", 0),
+                        getattr(response, "completion_tokens", 0),
+                    ),
+                    "session_id":         session_id or self.session_id,
+                    "user_id":            user_id or self.user_id,
+                    "tags":               tags or [],
+                    "timestamp":          _time.time(),
+                }
+                _t = self.on_trace(trace_span)
+                if asyncio.iscoroutine(_t):
+                    await _t
+            except Exception as te:
+                logger.warning(f"on_trace hook raised: {te}")
 
         return response
 

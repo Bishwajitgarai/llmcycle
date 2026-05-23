@@ -23,6 +23,15 @@ from .core.errors import (
     QuotaExceededError,
     ContentPolicyError,
 )
+# New market features
+from .core.injection import InjectionGuard, InjectionBlockedError
+from .core.prompts import PromptRegistry, PromptVersion
+from .core.semantic_cache import SemanticCache
+from .core.secrets import (
+    SecretLoader, EnvSecretLoader,
+    AWSSecretLoader, GCPSecretLoader, VaultSecretLoader,
+    SecretNotFoundError, SecretLoadError,
+)
 
 __all__ = [
     # Client
@@ -46,6 +55,16 @@ __all__ = [
     "StructuredOutputError",
     "QuotaExceededError",
     "ContentPolicyError",
+    # Injection guard
+    "InjectionGuard", "InjectionBlockedError",
+    # Prompt registry
+    "PromptRegistry", "PromptVersion",
+    # Semantic cache
+    "SemanticCache",
+    # Secret loaders
+    "SecretLoader", "EnvSecretLoader",
+    "AWSSecretLoader", "GCPSecretLoader", "VaultSecretLoader",
+    "SecretNotFoundError", "SecretLoadError",
 ]
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"

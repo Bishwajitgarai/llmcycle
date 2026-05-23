@@ -624,7 +624,72 @@ response = await client.complete(
 
 ---
 
-### 4. Multimodal Attachments 📎
+### 4. Semantic Caching 🧠
+Semantic caching uses TF-IDF + Cosine Similarity to serve cached responses for *conceptually similar* prompts, ignoring minor typos or word reordering.
+
+```python
+client = LLMCycle(semantic_cache=True)
+
+# First call hits the LLM
+resp1 = await client.complete("openai/gpt-4o", "Explain quantum physics to a 5 year old.")
+
+# Second call is served from Semantic Cache instantly!
+resp2 = await client.complete("openai/gpt-4o", "Explain quantum physics to a five yr old.")
+```
+
+---
+
+### 5. Shadow Routing (Dark Launching / A/B Testing) 👻
+Test new models in production with zero risk. Send production traffic to your primary model, and asynchronously mirror the identical prompt to a "shadow" model in the background.
+
+```python
+client = LLMCycle()
+resp = await client.complete(
+    "openai/gpt-4o",
+    "Summarize this meeting.",
+    shadow_models=["anthropic/claude-3-5-sonnet", "groq/llama-3.1-70b"]
+)
+# The user gets the GPT-4o response instantly.
+# Claude and Llama process the same request in the background and log it to storage.
+```
+
+---
+
+### 6. Prompt Registry & Versioning 📜
+Manage versioned prompt templates dynamically.
+
+```python
+client = LLMCycle()
+
+client.prompts.set("greeting", "Hello {{name}}, welcome to {{place}}!", version="v1")
+client.prompts.set("greeting", "Hey {{name}}, enjoy your stay at {{place}}!", version="v2")
+
+resp = await client.complete(
+    "openai/gpt-4o", 
+    client.prompts.render("greeting", name="Alice", place="Wonderland", version="v2")
+)
+```
+
+---
+
+### 7. Cost-Optimized Routing 💸
+Automatically route to the cheapest provider.
+
+```python
+from llmcycle.core.router import RoutingStrategy
+
+client = LLMCycle(
+    strategy=RoutingStrategy.COST_OPTIMIZED,
+    fallbacks={
+        "openai/gpt-4o-mini": ["anthropic/claude-3-haiku", "groq/llama-3.1-8b"]
+    }
+)
+# Routes to Groq -> OpenAI -> Anthropic (based on known input token costs)
+```
+
+---
+
+### 8. Multimodal Attachments 📎
 
 Run multimodal queries with zero-copy or automated cloud offloading. Simply pass PDF, image, audio, or video files into `attachments`.
 

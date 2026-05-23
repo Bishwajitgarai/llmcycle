@@ -13,6 +13,8 @@ import logging
 from enum import Enum
 from typing import Any, List, Dict, Optional, Tuple
 
+from llmcycle.utils import parse_model
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,6 +24,7 @@ class RoutingStrategy(Enum):
     LOWEST_LATENCY = "lowest_latency"  # pick the statistically fastest
     CANARY         = "canary"          # canary percentage traffic splits
     WEIGHTED       = "weighted"        # weight-based routing
+    COST_OPTIMIZED = "cost_optimized"  # route to cheapest provider first
 
 
 class LatencyTracker:
@@ -60,12 +63,14 @@ class ModelRouter:
         self,
         fallbacks: Optional[Dict[str, Any]] = None,
         strategy: RoutingStrategy = RoutingStrategy.PRIORITY,
+        pricing: Optional[Dict[str, Dict[str, float]]] = None,
     ):
         self.fallbacks = fallbacks or {}
-        self.strategy = strategy
-        self.latency = LatencyTracker()
+        self.strategy  = strategy
+        self.pricing   = pricing or {}   # shared with client — same DEFAULT_PRICING dict
+        self.latency   = LatencyTracker()
         self._rr_index: Dict[str, int] = {}
-        self._lock = threading.Lock()
+        self._lock     = threading.Lock()
 
     def get_route(self, model: str) -> List[Tuple[str, str]]:
         """
@@ -85,10 +90,10 @@ class ModelRouter:
                 remaining = [c for c in choices if c != selected]
                 remaining.sort(key=lambda c: fb_val[c], reverse=True)
 
-                candidates = [self._parse(selected)] + [self._parse(r) for r in remaining]
+                candidates = [parse_model(selected)] + [parse_model(r) for r in remaining]
                 return candidates
 
-        primary_provider, primary_model = self._parse(model)
+        primary_provider, primary_model = parse_model(model)
         candidates = [(primary_provider, primary_model)]
 
         # Look up fallbacks by full key ("openai/gpt-4o") or provider key ("openai")
@@ -103,7 +108,7 @@ class ModelRouter:
             fb_list = fb_keys_sorted
 
         for fb in fb_list:
-            candidates.append(self._parse(fb))
+            candidates.append(parse_model(fb))
 
         if self.strategy == RoutingStrategy.LOWEST_LATENCY:
             candidates.sort(key=lambda t: self.latency.get(t[0]))
@@ -114,20 +119,22 @@ class ModelRouter:
                 candidates = candidates[idx:] + candidates[:idx]
                 self._rr_index[model] = (idx + 1) % len(candidates)
 
+        elif self.strategy == RoutingStrategy.COST_OPTIMIZED:
+            candidates.sort(key=lambda t: self._input_cost(t[1] or t[0]))
+
         return candidates
+
+    def _input_cost(self, model_name: str) -> float:
+        """
+        Look up the input cost (USD/1K tokens) for a model using the same
+        partial-key match as client._get_pricing.
+        Unknown models sort last (float inf).
+        """
+        name_lower = model_name.lower()
+        for key, price in self.pricing.items():
+            if key in name_lower:
+                return price.get("input", float("inf"))
+        return float("inf")
 
     def record_latency(self, provider: str, latency_ms: float):
         self.latency.record(provider, latency_ms)
-
-    @staticmethod
-    def _parse(model_str: str) -> Tuple[str, str]:
-        """
-        "openai/gpt-4o" → ("openai", "gpt-4o")
-        "gpt-4o"         → ("openai", "gpt-4o")   ← infer provider
-        "groq"           → ("groq",  "")
-        """
-        if "/" in model_str:
-            parts = model_str.split("/", 1)
-            return parts[0].lower(), parts[1]
-        # Bare model name — return as-is; caller resolves provider
-        return model_str.lower(), model_str
