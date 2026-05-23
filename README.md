@@ -1,4 +1,5 @@
 <div align="center">
+  <img src="public/images/llmcycle.jpg" alt="LLMCycle Logo" width="100%" />
 
 # LLMCycle ♻️
 ### The Production-Grade Universal LLM Router
