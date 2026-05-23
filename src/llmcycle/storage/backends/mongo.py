@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Optional, List
 from llmcycle.storage.base import BaseStorage
 from llmcycle.storage.models import (
-    Workplace, Team, User, Session, LLMRequest, HistoryMessage
+    Workplace, Team, User, Session, LLMRequest, HistoryMessage, StoreConfig
 )
 
 
@@ -218,3 +218,17 @@ class MongoStorage(BaseStorage):
             deleted["sessions"] = r.deleted_count
 
         return {"deleted": deleted}
+
+    # ── Configuration ────────────────────────────────────────────────
+    async def save_config(self, key: str, value: dict) -> StoreConfig:
+        config = StoreConfig(key=key, value=value)
+        await self._col("configs").replace_one(
+            {"key": key},
+            config.model_dump(),
+            upsert=True
+        )
+        return config
+
+    async def get_config(self, key: str) -> Optional[StoreConfig]:
+        doc = await self._col("configs").find_one({"key": key})
+        return StoreConfig(**doc) if doc else None

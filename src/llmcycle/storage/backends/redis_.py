@@ -8,7 +8,7 @@ import json, time
 from typing import Optional, List
 from llmcycle.storage.base import BaseStorage
 from llmcycle.storage.models import (
-    Workplace, Team, User, Session, LLMRequest, HistoryMessage
+    Workplace, Team, User, Session, LLMRequest, HistoryMessage, StoreConfig
 )
 
 _PREFIX = "llmc:"
@@ -34,18 +34,24 @@ class RedisStorage(BaseStorage):
       llmc:history:{sid}       → list (RPUSH)
     """
 
-    def __init__(self, url: str, ttl_sessions: int = 86400, ttl_requests: int = 604800):
+    def __init__(self, url: str, ttl_sessions: int = 86400, ttl_requests: int = 604800, key_prefix: str = "llmc_", driver=None):
         self.url = url
         self.ttl_sessions = ttl_sessions   # 1 day default
         self.ttl_requests = ttl_requests   # 7 days default
+        self._prefix = key_prefix
+        self.driver = driver
         self._r = None
 
     async def connect(self):
-        try:
-            from redis.asyncio import from_url
-        except ImportError:
-            raise ImportError("Redis backend requires 'redis'. Install: pip install redis[asyncio]")
-        self._r = await from_url(self.url, decode_responses=True)
+        if self.driver:
+            await self.driver.connect_async()
+            self._r = self.driver.get_async_client()
+        else:
+            try:
+                from redis.asyncio import from_url
+            except ImportError:
+                raise ImportError("Redis backend requires 'redis'. Install: pip install redis[asyncio]")
+            self._r = await from_url(self.url, decode_responses=True)
 
     async def disconnect(self):
         if self._r:
@@ -62,7 +68,7 @@ class RedisStorage(BaseStorage):
         except Exception as e:
             return {"ok": False, "backend": "redis", "url": self.url, "error": str(e)}
 
-    def _k(self, *parts): return _PREFIX + ":".join(parts)
+    def _k(self, *parts): return self._prefix + ":".join(parts)
 
     async def _set(self, key: str, obj: dict, ttl: int = 0):
         await self._r.set(key, json.dumps(obj))
@@ -294,3 +300,14 @@ class RedisStorage(BaseStorage):
             deleted["history"] = count
 
         return {"deleted": deleted}
+
+    # ── Configuration ────────────────────────────────────────────────
+
+    async def save_config(self, key: str, value: dict) -> StoreConfig:
+        config = StoreConfig(key=key, value=value)
+        await self._set(self._k("config", key), config.model_dump())
+        return config
+
+    async def get_config(self, key: str) -> Optional[StoreConfig]:
+        d = await self._get(self._k("config", key))
+        return StoreConfig(**d) if d else None

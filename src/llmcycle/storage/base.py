@@ -8,7 +8,7 @@ from typing import Optional, List
 
 from llmcycle.storage.models import (
     Workplace, Team, User, Session, LLMRequest, HistoryMessage,
-    ToolCall, RequestFeedback,
+    ToolCall, RequestFeedback, StoreConfig
 )
 
 
@@ -356,4 +356,15 @@ class BaseStorage(ABC):
         limit: int = 100,
     ) -> List[RequestFeedback]:
         """List feedback records filtered by request, user, or session."""
+        ...
+
+    # ── Configuration ────────────────────────────────────────────────
+    @abstractmethod
+    async def save_config(self, key: str, value: dict) -> StoreConfig:
+        """Save a generic JSON configuration object."""
+        ...
+
+    @abstractmethod
+    async def get_config(self, key: str) -> Optional[StoreConfig]:
+        """Retrieve a saved configuration object."""
         ...

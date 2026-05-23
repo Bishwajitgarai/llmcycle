@@ -27,7 +27,7 @@ class City(BaseModel):
 
 def _make_client() -> LLMCycle:
     """Return a bare LLMCycle client with no env keys loaded."""
-    with patch.object(LLMCycle, "_auto_load_from_env", return_value=None):
+    with patch.object(LLMCycle, "_auto_load_configs", return_value=None):
         return LLMCycle()
 
 

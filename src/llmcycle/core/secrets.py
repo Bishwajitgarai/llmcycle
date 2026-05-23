@@ -14,7 +14,7 @@ Usage::
 
     # Load from environment variables (default — always available)
     loader = EnvSecretLoader()
-    key = loader.load("OPENAI_API_KEY")   # reads os.environ["OPENAI_API_KEY"]
+    key = loader.load("OPENAI_API_KEYS")   # reads os.environ["OPENAI_API_KEYS"]
 
     # Load from AWS Secrets Manager (requires boto3)
     loader = AWSSecretLoader(region="us-east-1")
@@ -57,7 +57,7 @@ class SecretLoader(ABC):
         Load multiple secrets.
 
         Args:
-            mapping: {alias → secret_id} — e.g. {"openai_key": "OPENAI_API_KEY"}
+            mapping: {alias → secret_id} — e.g. {"openai_key": "OPENAI_API_KEYS"}
 
         Returns:
             {alias → secret_value}
@@ -91,11 +91,11 @@ class EnvSecretLoader(SecretLoader):
     Usage::
 
         loader = EnvSecretLoader()
-        key = loader.load("OPENAI_API_KEY")   # → os.environ["OPENAI_API_KEY"]
+        key = loader.load("OPENAI_API_KEYS")   # → os.environ["OPENAI_API_KEYS"]
 
         # With prefix stripping
         loader = EnvSecretLoader(prefix="PROD_")
-        key = loader.load("OPENAI_API_KEY")   # reads PROD_OPENAI_API_KEY
+        key = loader.load("OPENAI_API_KEYS")   # reads PROD_OPENAI_API_KEYS
     """
 
     def __init__(self, prefix: str = ""):

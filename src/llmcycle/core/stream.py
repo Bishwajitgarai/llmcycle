@@ -34,7 +34,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import AsyncGenerator, List, Optional
+from typing import AsyncGenerator, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from llmcycle.core.router import RoutingStrategy
 
 from llmcycle.schema import CompletionRequest, CompletionResponse, Message
 from llmcycle.core.errors import (
@@ -110,6 +113,8 @@ class StreamResilienceManager:
         self,
         request: CompletionRequest,
         retry_policy: Optional[RetryPolicy] = None,
+        strategy: Optional["RoutingStrategy"] = None,
+        group: Optional[str] = None,
     ) -> CompletionResponse:
         """
         Smart completion with adaptive retry.
@@ -118,7 +123,15 @@ class StreamResilienceManager:
         """
         policy = retry_policy or self._default_policy()
         state = SmartRetryState(policy)
-        route = self.router.get_route(request.model)
+        if group and request.model and group != request.model:
+            primary_route = self.router.get_route(request.model, strategy=strategy)
+            group_route = self.router.get_route(group, strategy=strategy)
+            route = primary_route
+            for r in group_route:
+                if r not in route:
+                    route.append(r)
+        else:
+            route = self.router.get_route(group or request.model, strategy=strategy)
         errors: List[LLMCycleError] = []
 
         for provider_name, model in route:
@@ -190,6 +203,8 @@ class StreamResilienceManager:
         request: CompletionRequest,
         stop_event: Optional[asyncio.Event] = None,
         retry_policy: Optional[RetryPolicy] = None,
+        strategy: Optional["RoutingStrategy"] = None,
+        group: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Smart resilient streaming.
@@ -206,7 +221,15 @@ class StreamResilienceManager:
         """
         policy = retry_policy or self._default_policy()
         state = SmartRetryState(policy)
-        route = self.router.get_route(request.model)
+        if group and request.model and group != request.model:
+            primary_route = self.router.get_route(request.model, strategy=strategy)
+            group_route = self.router.get_route(group, strategy=strategy)
+            route = primary_route
+            for r in group_route:
+                if r not in route:
+                    route.append(r)
+        else:
+            route = self.router.get_route(group or request.model, strategy=strategy)
         errors: List[LLMCycleError] = []
         generated_so_far = ""
         _stopped = False

@@ -192,9 +192,28 @@ LLMCYCLE_USER_ADMIN_PAASWORD=admin
 
 ---
 
+## 📚 Examples
+
+Check out our comprehensive examples directly from the GitHub repository to see LLMCycle in action:
+- [Dynamic Group Routing & Fallbacks](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/dynamic_groups_example.py)
+- [Pluggable Storage Drivers & SQL Customization](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/storage_drivers_example.py)
+- [Global Config Loading with Redis](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/config_sync_example.py)
+- [Semantic Routing & Caching](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/semantic_router_example.py)
+- [High-Concurrency Batch Processing](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/batch_processing_example.py)
+- [Agentic Tool Calling Loops](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/tool_calling_agent_example.py)
+- [Strict Pydantic Structured Output](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/structured_output_example.py)
+- [Mid-Stream Resilient Failover](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/mid_stream_failover_example.py)
+- [Guardrails & Prompt Injection Protection](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/guardrails_example.py)
+- [Budgets & Rate Limiting Enforcement](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/rate_limit_and_budget_example.py)
+- [Routing to Custom Local Models (Ollama/vLLM)](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/custom_local_model_example.py)
+- [Complete LLM Feature Demo](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/complete_llm_example.py)
+- [Multimodal Chat Demo](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/multimodal_example.py)
+
+---
+
 ## 💻 Full SDK Usage
 
-### Init with fallback chains
+### Init with Fallback Chains & Routing Groups
 
 ```python
 from llmcycle import LLMCycle
@@ -202,6 +221,14 @@ from llmcycle.core.router import RoutingStrategy
 
 client = LLMCycle(
     env_path=".env",
+    groups={
+        # Groups let you define logical clusters of models for auto-fallback
+        "fast_tier": [
+            "groq/llama-3.1-70b",
+            "openai/gpt-4o-mini",
+            "anthropic/claude-3-haiku"
+        ]
+    },
     fallbacks={
         # provider-level: if deepseek is down, try groq, then openai
         "deepseek": ["groq", "openai"],
@@ -212,8 +239,23 @@ client = LLMCycle(
             "openai/gpt-4o-mini",
         ],
     },
-    strategy=RoutingStrategy.PRIORITY,   # or ROUND_ROBIN, LOWEST_LATENCY
+    strategy=RoutingStrategy.PRIORITY,   # or ROUND_ROBIN, LOWEST_LATENCY, COST
 )
+
+# You can now route to a specific group, and LLMCycle will automatically try the first healthy model!
+response = await client.complete(group="fast_tier", prompt="Hello!")
+
+# If you provide both model AND group, the model acts as primary and group acts as fallback:
+response = await client.complete(model="openai/gpt-4o", group="fast_tier", prompt="Hello!")
+
+# ── Dynamic Group Management at Runtime ──
+# You can also add, update, list, and delete groups on the fly without restarting:
+client.router.groups.set("cost_saver", ["groq/llama-3.1-8b", "deepseek/deepseek-chat"])
+
+print(client.router.groups.list_all())
+# → {"fast_tier": [...], "cost_saver": ["groq/llama-3.1-8b", "deepseek/deepseek-chat"]}
+
+client.router.groups.remove("cost_saver")
 ```
 
 ### List providers + keys health
@@ -772,10 +814,12 @@ llmcycle ui    # picks up host/port from .env automatically
 
 ---
 
-## 🗄️ Storage Layer
+## 🗄️ Storage Layer & Pluggable Drivers
 
-Persist sessions, users, requests, and full conversation history to **any one** backend.
+Persist sessions, users, requests, configs, and full conversation history to **any one** backend.
 Pick exactly one — configured via `.env` or passed directly to the class.
+
+LLMCycle uses a robust **Driver** pattern under the hood, ensuring your storage engine can dynamically handle custom schemas, namespaces, and runtime connection overrides.
 
 ### Install your backend
 
@@ -817,22 +861,25 @@ store = StorageManager(
     table_prefix="llm_",     # → analytics.llm_requests, analytics.llm_users ...
 )
 
-# MongoDB — schema = database name, prefix = collection prefix
-store = StorageManager(
-    backend=StorageBackend.MONGO,
-    url="mongodb://localhost:27017",
-    schema="my_llm_db",
-    table_prefix="prod_",    # → prod_requests, prod_sessions ...
-)
-
-# Redis — prefix applies to all keys
-store = StorageManager(
-    backend=StorageBackend.REDIS,
-    url="redis://localhost:6379/0",
-    table_prefix="myapp:",
-)
+# You can even inject a custom driver directly!
+from llmcycle.drivers.sql import SQLDriver
+custom_driver = SQLDriver(url="sqlite+aiosqlite:///:memory:")
+store = StorageManager(StorageBackend.SQLITE, driver=custom_driver)
 
 await store.connect()
+```
+
+### 🌍 Global Config Sync via ConfigLoaders
+
+When scaling LLMCycle across multiple workers, use `ConfigLoader` to sync routes and API keys across nodes:
+
+```python
+from llmcycle.core.config_loader import RedisConfigLoader
+from llmcycle.drivers.redis import RedisDriver
+
+# Automatically load fallback chains and groups from Redis dynamically!
+loader = RedisConfigLoader(driver=RedisDriver("redis://localhost:6379/0"))
+client = LLMCycle(config_loader=loader)
 ```
 
 ### Priority: direct args > env vars > defaults

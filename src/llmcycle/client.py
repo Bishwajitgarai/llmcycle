@@ -48,46 +48,20 @@ from llmcycle.core.errors import (
 from llmcycle.core.injection import InjectionGuard, InjectionBlockedError
 from llmcycle.core.prompts import PromptRegistry
 from llmcycle.core.semantic_cache import SemanticCache
+from llmcycle.core.groups import GroupManager
 from llmcycle.providers.openai_compatible import OpenAICompatibleProvider
 from llmcycle.providers.registry import PROVIDER_REGISTRY
-from llmcycle.utils import parse_model
+from llmcycle.utils import parse_model, DEFAULT_PRICING, DEFAULT_CONTEXT_WINDOWS
+from llmcycle.core.config_loader import ConfigLoader, EnvConfigLoader, RedisConfigLoader
+from enum import Enum
+
+class ConfigSource(Enum):
+    ENV = "env"
+    REDIS = "redis"
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
-
-# ─── Pricing registry (USD per 1K tokens) ─────────────────────────────────────
-# Override / extend via client.pricing["gpt-4o"] = {"input": 0.005, "output": 0.015}
-DEFAULT_PRICING: Dict[str, Dict[str, float]] = {
-    "gpt-4o":              {"input": 0.005,   "output": 0.015},
-    "gpt-4o-mini":         {"input": 0.00015, "output": 0.0006},
-    "gpt-4-turbo":         {"input": 0.01,    "output": 0.03},
-    "gpt-3.5-turbo":       {"input": 0.0005,  "output": 0.0015},
-    "claude-3-opus":       {"input": 0.015,   "output": 0.075},
-    "claude-3-sonnet":     {"input": 0.003,   "output": 0.015},
-    "claude-3-haiku":      {"input": 0.00025, "output": 0.00125},
-    "deepseek-chat":       {"input": 0.00014, "output": 0.00028},
-    "llama-3.1-70b":       {"input": 0.00059, "output": 0.00079},
-    "llama-3.1-8b":        {"input": 0.00005, "output": 0.00008},
-    "mixtral-8x7b":        {"input": 0.00024, "output": 0.00024},
-    "gemma-7b-it":         {"input": 0.00007, "output": 0.00007},
-}
-
-# ─── Context window registry (tokens) ─────────────────────────────────────────
-DEFAULT_CONTEXT_WINDOWS: Dict[str, int] = {
-    "gpt-4o":              128_000,
-    "gpt-4o-mini":         128_000,
-    "gpt-4-turbo":         128_000,
-    "gpt-3.5-turbo":       16_385,
-    "claude-3-opus":       200_000,
-    "claude-3-sonnet":     200_000,
-    "claude-3-haiku":      200_000,
-    "deepseek-chat":       64_000,
-    "llama-3.1-70b":       128_000,
-    "llama-3.1-8b":        128_000,
-    "mixtral-8x7b":        32_768,
-    "gemma-7b-it":         8_192,
-}
 
 
 class _CacheEntry:
@@ -109,11 +83,35 @@ class LLMCycle:
         async for chunk in client.stream("groq/llama-3.1-70b", "Write a poem"):
             print(chunk, end="")
 
-    With storage auto-save::
+    With Storage Auto-Save & Unified Drivers::
 
-        store = StorageManager(backend=StorageBackend.SQLITE)
-        await store.connect()
-        client = LLMCycle(storage=store, session_id="sess-1", user_id="user-1")
+        from llmcycle.client import LLMCycle, ConfigSource
+        from llmcycle.storage import StorageManager
+        
+        # 1. Setup Storage (Auto-builds Drivers)
+        store = StorageManager(url="redis://localhost:6379/0")
+        
+        # 2. Client auto-inherits the driver for Config Loading!
+        client = LLMCycle(
+            storage=store, 
+            config_source=ConfigSource.REDIS,
+            session_id="sess-1", 
+            user_id="user-1"
+        )
+
+    Dynamic Model Groups (Aliases & Fallbacks)::
+
+        client.router.groups.set("fast", ["groq/llama3", "openai/gpt-4o-mini"])
+        
+        # ACTIVE_FIRST routing automatically skips exhausted providers!
+        # Pass a group as a fallback or primary target:
+        response = await client.complete(group="fast", prompt="Hello!", strategy=RoutingStrategy.ACTIVE_FIRST)
+        
+        # You can also pass both model AND group:
+        response = await client.complete(model="openai/gpt-4o", group="fast", prompt="Hello!")
+
+        # Persist groups to your database (SQL/Mongo/Redis)
+        await client.router.groups.save()
 
     Tool calling loop::
 
@@ -140,24 +138,59 @@ class LLMCycle:
             "What is the weather in London? Reply as JSON.",
             schema=Answer,
         )
-        print(answer.city)  # "London"
 
     Budget enforcement::
 
         client = LLMCycle(max_cost_usd=1.00)   # raises BudgetExceededError at $1
 
-    Prompt caching::
+    Prompt Caching & Semantic Caching::
 
-        response1 = await client.complete("openai/gpt-4o-mini", "What is 2+2?", cache_ttl=300)
-        response2 = await client.complete("openai/gpt-4o-mini", "What is 2+2?", cache_ttl=300)
-        # response2 is served from cache — zero API cost, instant return
+        # Exact match cache
+        res1 = await client.complete("openai/gpt-4o", "What is 2+2?", cache_ttl=300)
+        res2 = await client.complete("openai/gpt-4o", "What is 2+2?", cache_ttl=300) # Instant
+        
+        # Semantic cache (TF-IDF Cosine Similarity)
+        client = LLMCycle(semantic_cache=SemanticCache(similarity_threshold=0.85))
+        res3 = await client.complete("openai/gpt-4o", "How do I build a RAG app?")
+        res4 = await client.complete("openai/gpt-4o", "What's the best way to make a RAG application?") # Instant
+    Args:
+        env_path: Path to the .env file for auto-loading provider configs.
+        fallbacks: Optional dictionary of fallback chains mapping models/providers to a list of fallback models.
+        groups: Optional dictionary mapping group names to a list of models. Groups can be dynamically managed via `client.router.groups`.
+        strategy: Routing strategy enum. E.g., PRIORITY, ROUND_ROBIN, LOWEST_LATENCY, COST_OPTIMIZED, ACTIVE_FIRST.
+        config_source: Source for config auto-loading (ENV or REDIS).
+        config_prefix: Prefix for searching config keys.
+        config_suffix: Suffix for searching config keys (e.g., _API_KEYS).
+        redis_url: Redis URL if config_source=REDIS.
+        log_level: Logging level (e.g., "WARNING").
+        storage: Optional StorageManager instance. If provided, enables DB persistence for configs, history, groups, etc.
+        session_id: Default session stamped on all requests.
+        user_id: Default user stamped on all requests.
+        team_id: Default team stamped on all requests.
+        workplace_id: Default workplace stamped on all requests.
+        max_cost_usd: Hard budget enforcement.
+        pricing: Custom pricing override dictionary.
+        context_windows: Custom context window dictionary.
+        auto_trim_context: Automatically truncate messages if over context limit.
+        cache: Cache settings for prompts (True for InMemory or instance of BaseCache).
+        semantic_cache: Semantic similarity cache for prompt matching.
+        rate_limits: Client-side rate limiting dictionary.
+        guardrail: True to enable default guardrail, or instance of GuardrailManager.
+        injection_guard: True to enable prompt injection guards.
+        attachment_storage: Storage path/type for attachments.
+        proxy: Proxy string for network requests.
     """
 
     def __init__(
         self,
         env_path: str = ".env",
         fallbacks: Optional[Dict[str, List[str]]] = None,
+        groups: Optional[Dict[str, List[str]]] = None,
         strategy: RoutingStrategy = RoutingStrategy.PRIORITY,
+        config_source: ConfigSource = ConfigSource.ENV,
+        config_prefix: str = "",
+        config_suffix: str = "_API_KEYS",
+        redis_url: Optional[str] = None,
         log_level: str = "WARNING",
         # Storage integration
         storage=None,                      # Optional[StorageManager]
@@ -278,30 +311,54 @@ class LLMCycle:
         self.on_error:  Optional[Callable] = None
         self.on_trace:  Optional[Callable] = None
 
-        self._auto_load_from_env()
-        self.router      = ModelRouter(fallbacks=fallbacks or {}, strategy=strategy, pricing=self.pricing)
+        self.groups = GroupManager(groups)
+        self.groups.storage = self.storage
+        
+        # Initialize the appropriate config loader based on user preferences
+        if config_source == ConfigSource.ENV:
+            self._config_loader = EnvConfigLoader(prefix=config_prefix, suffix=config_suffix)
+        elif config_source == ConfigSource.REDIS:
+            active_driver = getattr(self.storage, 'driver', None) if self.storage else None
+            if not redis_url and not active_driver:
+                raise ValueError("redis_url or a StorageManager with a driver must be provided when using ConfigSource.REDIS")
+            self._config_loader = RedisConfigLoader(
+                redis_url=redis_url or getattr(active_driver, 'url', ""), 
+                prefix=config_prefix, 
+                suffix=config_suffix, 
+                driver=active_driver
+            )
+        else:
+            raise ValueError(f"Unknown config_source: {config_source}")
+
+        self._auto_load_configs()
+        self.router      = ModelRouter(
+            fallbacks=fallbacks or {}, 
+            groups=self.groups, 
+            strategy=strategy, 
+            pricing=self.pricing,
+            key_manager=self.key_manager
+        )
         self._stream_mgr = StreamResilienceManager(self.router, self.key_manager, self._providers)
 
     # ─── Auto-discovery ──────────────────────────────────────────────────────
 
-    def _auto_load_from_env(self):
-        """Scan env for *_API_KEYS patterns and register providers."""
-        for env_key, env_val in os.environ.items():
-            if not env_key.endswith("_API_KEYS"):
-                continue
-            provider_name = env_key[: -len("_API_KEYS")].upper()
-            keys = [k.strip() for k in env_val.split(",") if k.strip()]
-            if not keys:
-                continue
-            base_url = (
-                os.environ.get(f"{provider_name}_BASE_URL")
-                or PROVIDER_REGISTRY.get(provider_name)
-                or f"https://api.{provider_name.lower()}.com/v1"
-            )
-            p_key = provider_name.lower()
-            self._providers[p_key] = OpenAICompatibleProvider(base_url, provider_name=p_key, proxy=self.proxy)
-            self.key_manager.add_keys(p_key, keys)
-            logger.info(f"Registered provider [{p_key}] with {len(keys)} key(s) → {base_url}")
+    def _auto_load_configs(self):
+        """Scan configured loaders and register providers."""
+        configs = self._config_loader.load_configs()
+        for provider_name, config in configs.items():
+                p_key = provider_name.lower()
+                keys = [k.strip() for k in config.get("api_keys", "").split(",") if k.strip()]
+                if not keys:
+                    continue
+                base_url = (
+                    config.get("base_url")
+                    or PROVIDER_REGISTRY.get(provider_name.upper())
+                    or f"https://api.{p_key}.com/v1"
+                )
+                if p_key not in self._providers:
+                    self._providers[p_key] = OpenAICompatibleProvider(base_url, provider_name=p_key, proxy=self.proxy)
+                self.key_manager.add_keys(p_key, keys)
+                logger.info(f"Registered provider [{p_key}] with {len(keys)} key(s) → {base_url}")
 
     # ─── Provider management ─────────────────────────────────────────────────
 
@@ -493,9 +550,11 @@ class LLMCycle:
 
     async def complete(
         self,
-        model: str,
+        model: Optional[str] = None,
         prompt: Optional[str] = None,
         messages: Optional[List[dict]] = None,
+        group: Optional[str] = None,
+        strategy: Optional[RoutingStrategy] = None,
         max_retries: int = 2,
         retry_delay: float = 1.0,
         timeout: Optional[float] = None,
@@ -519,6 +578,10 @@ class LLMCycle:
             model:              Model string, e.g. "openai/gpt-4o-mini" or an alias.
             prompt:             User prompt (convenience — builds a single user message).
             messages:           Full messages list (overrides prompt).
+            group:              Optional group ID to use for routing/fallback. 
+                                If both model and group are provided, model is tried first, 
+                                and group is used as the fallback list.
+            strategy:           Optional RoutingStrategy override for this request.
             cache_ttl:          Cache identical prompts for this many seconds (0 = no cache).
             parent_request_id:  Link to a parent request (used in tool-call chains).
             turn_number:        Which turn in an agentic loop (0 = first user turn).
@@ -532,7 +595,11 @@ class LLMCycle:
                                 failure the call behaves as an error (no retry via
                                 shadow_models but surfaces the ValidationError).
         """
-        model = self._resolve_model(model)
+        if not model and not group:
+            raise ValueError("Must provide 'model' or 'group'.")
+            
+        if model:
+            model = self._resolve_model(model)
 
         if messages is None:
             if prompt is None:
@@ -582,7 +649,7 @@ class LLMCycle:
         if self.rate_limit_manager:
             prompt_text = prompt or "".join(self._get_content_text(m.get("content", "")) for m in messages)
             est_tokens = self._estimate_tokens(prompt_text)
-            await self.rate_limit_manager.get_limiter(model).acquire(est_tokens)
+            await self.rate_limit_manager.get_limiter(model or group).acquire(est_tokens)
 
         # Guardrails: Mask prompt/messages in-flight
         if self.guardrail:
@@ -608,17 +675,17 @@ class LLMCycle:
 
         # Context trim
         if self.auto_trim_context:
-            messages = self._trim_messages(messages, model)
+            messages = self._trim_messages(messages, model or group or "")
 
         # Prompt cache check
         cache_key = None
         if cache_ttl:
-            cache_key = self._cache_key(model, messages, kwargs)
+            cache_key = self._cache_key(model or group or "", messages, kwargs)
             cached = await self._cache_get(cache_key)
             if cached:
                 logger.debug(f"Prompt cache hit for model={model}")
                 await self._save(
-                    model=model, provider=cached.provider or "",
+                    model=model or group or "", provider=cached.provider or "",
                     prompt=prompt or "", response=cached.content or "",
                     prompt_tokens=cached.prompt_tokens or 0,
                     completion_tokens=cached.completion_tokens or 0,
@@ -635,12 +702,12 @@ class LLMCycle:
         # Before hook
         if self.on_before:
             try:
-                await self.on_before(model, messages, kwargs)
+                await self.on_before(model or group or "", messages, kwargs)
             except Exception as e:
                 logger.warning(f"on_before hook raised: {e}")
 
         req = CompletionRequest(
-            model=model,
+            model=model or group,
             messages=[Message(**m) for m in messages],
             **kwargs,
         )
@@ -652,7 +719,7 @@ class LLMCycle:
         response = None
 
         try:
-            coro = self._stream_mgr.complete(req, retry_policy=policy)
+            coro = self._stream_mgr.complete(req, retry_policy=policy, strategy=strategy, group=group)
             response = await (asyncio.wait_for(coro, timeout=timeout) if timeout else coro)
 
             # Unmask response if guardrails are active
@@ -662,7 +729,7 @@ class LLMCycle:
             if validators and response:
                 for validator in validators:
                     try:
-                        result = validator(model, response)
+                        result = validator(model or group or "", response)
                         if asyncio.iscoroutine(result):
                             await result
                     except Exception as ve:
@@ -692,7 +759,7 @@ class LLMCycle:
             # After hook
             if self.on_after:
                 try:
-                    await self.on_after(model, response)
+                    await self.on_after(model or group or "", response)
                 except Exception as e:
                     logger.warning(f"on_after hook raised: {e}")
 
@@ -706,23 +773,23 @@ class LLMCycle:
             error_msg = str(e); status = "error"
             if self.on_error:
                 try:
-                    await self.on_error(model, e)
+                    await self.on_error(model or group or "", e)
                 except Exception:
                     pass
             raise
         finally:
             latency_ms = round((_time.monotonic() - t0) * 1000, 2)
             cost = self._estimate_cost(
-                model,
+                model or group or "",
                 getattr(response, "prompt_tokens", 0) or 0,
                 getattr(response, "completion_tokens", 0) or 0,
             )
             self._check_budget(cost)
             if cost:
                 self._total_cost_usd += cost
-            price = self._get_pricing(model)
+            price = self._get_pricing(model or group or "")
             await self._save(
-                model=model,
+                model=model or group or "",
                 provider=getattr(response, "provider", ""),
                 prompt=prompt or "",
                 response=getattr(response, "content", ""),
@@ -758,14 +825,14 @@ class LLMCycle:
             try:
                 trace_span = {
                     "name":               "llmcycle.complete",
-                    "model":              model,
+                    "model":              model or group or "",
                     "provider":           getattr(response, "provider", ""),
                     "status":             status,
                     "latency_ms":         round((_time.monotonic() - t0) * 1000, 2),
                     "prompt_tokens":      getattr(response, "prompt_tokens", 0),
                     "completion_tokens":  getattr(response, "completion_tokens", 0),
                     "cost_usd":           self._estimate_cost(
-                        model,
+                        model or group or "",
                         getattr(response, "prompt_tokens", 0),
                         getattr(response, "completion_tokens", 0),
                     ),
@@ -786,11 +853,13 @@ class LLMCycle:
 
     async def stream(
         self,
-        model: str,
+        model: Optional[str] = None,
         prompt: Optional[str] = None,
         messages: Optional[List[dict]] = None,
         max_retries: int = 2,
         retry_delay: float = 1.0,
+        group: Optional[str] = None,
+        strategy: Optional[RoutingStrategy] = None,
         stop_event: Optional[asyncio.Event] = None,
         timeout: Optional[float] = None,
         session_id: Optional[str] = None,
@@ -804,14 +873,20 @@ class LLMCycle:
         **kwargs,
     ) -> AsyncGenerator[str, None]:
         """
-        Resilient streaming with mid-stream cancellation tracking.
+        Stream output from the LLM, auto-recovering on failure.
 
-        stop_event.set() → status="cancelled" saved to storage.
-        asyncio.CancelledError → status="cancelled" saved to storage.
-        timeout exceeded → status="timeout" saved to storage.
-        No other library tracks mid-stream cancel lifecycle in persistent storage.
+        Args:
+            model:       Model to use.
+            prompt:      The user prompt.
+            messages:    Alternatively, full message list.
+            group:       Optional group ID for routing.
+            strategy:    Optional RoutingStrategy override.
         """
-        model = self._resolve_model(model)
+        if not model and not group:
+            raise ValueError("Must provide 'model' or 'group'.")
+            
+        if model:
+            model = self._resolve_model(model)
 
         if messages is None:
             if prompt is None:
@@ -842,7 +917,7 @@ class LLMCycle:
         if self.rate_limit_manager:
             prompt_text = prompt or "".join(self._get_content_text(m.get("content", "")) for m in messages)
             est_tokens = self._estimate_tokens(prompt_text)
-            await self.rate_limit_manager.get_limiter(model).acquire(est_tokens)
+            await self.rate_limit_manager.get_limiter(model or group).acquire(est_tokens)
 
         # Guardrails: Mask prompt/messages in-flight
         if self.guardrail:
@@ -867,10 +942,10 @@ class LLMCycle:
                 prompt = self.guardrail.mask_prompt(prompt)
 
         if self.auto_trim_context:
-            messages = self._trim_messages(messages, model)
+            messages = self._trim_messages(messages, model or group or "")
 
         req = CompletionRequest(
-            model=model,
+            model=model or group,
             messages=[Message(**m) for m in messages],
             stream=True,
             **kwargs,
@@ -885,7 +960,7 @@ class LLMCycle:
         first_chunk_at: Optional[float] = None
 
         try:
-            async for chunk in self._stream_mgr.safe_stream(req, stop_event=stop_event, retry_policy=policy):
+            async for chunk in self._stream_mgr.safe_stream(req, stop_event=stop_event, retry_policy=policy, strategy=strategy, group=group):
                 if deadline and _time.monotonic() > deadline:
                     status = "timeout"; error_msg = f"Stream exceeded {timeout}s"; cancelled_at = _time.time()
                     break
@@ -910,14 +985,14 @@ class LLMCycle:
         finally:
             latency_ms = round((_time.monotonic() - t0) * 1000, 2)
             ttft = round((first_chunk_at - t0) * 1000, 2) if first_chunk_at else None
-            price = self._get_pricing(model)
+            price = self._get_pricing(model or group or "")
             
             response_text = "".join(chunks)
             if self.guardrail:
                 response_text = self.guardrail.unmask_response(response_text)
                 
             await self._save(
-                model=model, provider="",
+                model=model or group or "", provider="",
                 prompt=prompt or "", response=response_text,
                 latency_ms=latency_ms, time_to_first_token_ms=ttft,
                 timeout_ms=timeout * 1000 if timeout else None,
@@ -939,56 +1014,22 @@ class LLMCycle:
         prompt: Optional[str] = None,
         messages: Optional[List[dict]] = None,
         schema: Type[T] = None,
+        group: Optional[str] = None,
+        strategy: Optional[RoutingStrategy] = None,
         max_retries_parse: int = 2,
         use_tool_format: bool = True,   # ← True by default: tool-calling is more reliable
         **kwargs,
     ) -> T:
         """
-        Return a parsed Pydantic model instead of raw text.
-
-        By default (use_tool_format=True) this method drives the extraction
-        via the **OpenAI tool-calling API** rather than plain JSON prompting.
-        The model is given a single synthetic tool whose parameters match
-        the Pydantic schema exactly; it is forced to call that tool, so the
-        response arrives as structured key-value pairs — no JSON parsing
-        required, no markdown stripping, no regex heuristics.
-
-        Fall-back: if use_tool_format=False, OR if the provider returns no
-        tool-call (model doesn't support function-calling), the method
-        automatically falls back to the classic JSON-prompt approach with
-        up to max_retries_parse self-correction loops.
+        Complete and return a strictly validated Pydantic object.
 
         Args:
-            model:             Model string, e.g. "openai/gpt-4o-mini".
-            prompt:            User message (convenience).
-            messages:          Full messages list (overrides prompt).
-            schema:            Pydantic BaseModel subclass to populate.
-            max_retries_parse: Fallback retry budget for JSON-prompt mode.
-            use_tool_format:   True (default) → tool-calling API.
-                               False → legacy JSON-prompt approach.
-
-        Usage::
-
-            class WeatherAnswer(BaseModel):
-                city: str
-                temperature_c: float
-                conditions: str
-
-            # Tool-calling mode (default — most reliable)
-            answer = await client.complete_structured(
-                "openai/gpt-4o-mini",
-                prompt="What's the weather in London?",
-                schema=WeatherAnswer,
-            )
-            print(answer.city, answer.temperature_c)
-
-            # Legacy JSON-prompt mode
-            answer = await client.complete_structured(
-                "openai/gpt-4o-mini",
-                prompt="What's the weather in London? Reply as JSON.",
-                schema=WeatherAnswer,
-                use_tool_format=False,
-            )
+            model:    Model to use.
+            prompt:   The prompt text.
+            messages: Alternatively, full message list.
+            schema:   Pydantic model class to validate output against.
+            group:    Optional group ID for routing.
+            strategy: Optional RoutingStrategy override.
         """
         if schema is None:
             raise ValueError("schema= is required for complete_structured()")
@@ -1023,6 +1064,8 @@ class LLMCycle:
 
             response = await self.complete(
                 model,
+                group=group,
+                strategy=strategy,
                 messages=base_messages,
                 tools=[tool_def],
                 tool_choice={"type": "function", "function": {"name": tool_name}},
@@ -1066,7 +1109,7 @@ class LLMCycle:
         last_error = None
         raw = ""
         for attempt in range(max_retries_parse + 1):
-            response = await self.complete(model, messages=fb_messages, **kwargs)
+            response = await self.complete(model, group=group, strategy=strategy, messages=fb_messages, **kwargs)
             raw = (response.content or "").strip()
 
             # Strip markdown code fences if present
@@ -1115,6 +1158,8 @@ class LLMCycle:
         tools: Optional[List[dict]] = None,
         tool_executor: Optional[Callable] = None,
         max_tool_calls: int = 10,
+        group: Optional[str] = None,
+        strategy: Optional[RoutingStrategy] = None,
         timeout: Optional[float] = None,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,

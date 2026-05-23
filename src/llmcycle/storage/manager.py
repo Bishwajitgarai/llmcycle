@@ -61,6 +61,9 @@ class StorageManager:
                       Default: None (uses DB default schema).
         table_prefix: Prefix for all table/collection/key names.
                       If None, read LLMCYCLE_STORAGE_TABLE_PREFIX. Default: "llmc_".
+        driver:       Optional Database Driver (SQLDriver, MongoDriver, RedisDriver).
+                      If passed, automatically overrides backend and url.
+                      If omitted, automatically built based on the selected backend and url.
 
     Env vars (all overridden by direct args):
         LLMCYCLE_STORAGE_BACKEND      = sqlite | postgres | mysql | mssql | mongo | redis
@@ -81,20 +84,10 @@ class StorageManager:
             table_prefix="llm_",
         )
 
-        # MongoDB — schema = db name, prefix = collection prefix
-        store = StorageManager(
-            backend=StorageBackend.MONGO,
-            url="mongodb://localhost:27017",
-            schema="my_llm_db",
-            table_prefix="prod_",
-        )
-
-        # Redis — prefix applies to all keys
-        store = StorageManager(
-            backend=StorageBackend.REDIS,
-            url="redis://localhost:6379/0",
-            table_prefix="myapp:",
-        )
+        # Auto-detect driver from an explicitly declared RedisDriver
+        from llmcycle.drivers import RedisDriver
+        driver = RedisDriver("redis://localhost:6379/0")
+        store = StorageManager(driver=driver)
 
     Installation per backend::
 
@@ -113,6 +106,7 @@ class StorageManager:
         url: Optional[str] = None,
         schema: Optional[str] = None,
         table_prefix: Optional[str] = None,
+        driver=None,  # Optional[BaseDriver]
     ):
         # Resolve backend: arg > env > None
         if backend is None:
@@ -140,10 +134,45 @@ class StorageManager:
         if table_prefix is None:
             table_prefix = os.environ.get("LLMCYCLE_STORAGE_TABLE_PREFIX", "llmc_")
 
+        # Auto-infer backend from URL if URL is provided but backend is not
+        if not backend and url:
+            if url.startswith("redis"):
+                backend = StorageBackend.REDIS
+            elif url.startswith("mongodb"):
+                backend = StorageBackend.MONGO
+            elif url.startswith("postgres"):
+                backend = StorageBackend.POSTGRES
+            elif url.startswith("mysql"):
+                backend = StorageBackend.MYSQL
+            elif url.startswith("mssql"):
+                backend = StorageBackend.MSSQL
+            elif url.startswith("sqlite"):
+                backend = StorageBackend.SQLITE
+
+        # Auto-extract backend and url from driver if provided
+        if driver is not None:
+            backend = driver.backend_type
+            url = driver.url
+
         self.backend_type = backend
         self.url = url
         self.schema = schema
         self.table_prefix = table_prefix
+        
+        # Auto-detect driver if not provided but backend and url exist
+        if driver is None and self.backend_type and self.url:
+            if self.backend_type == StorageBackend.REDIS:
+                from llmcycle.drivers.redis import RedisDriver
+                driver = RedisDriver(self.url)
+            elif self.backend_type == StorageBackend.MONGO:
+                from llmcycle.drivers.mongo import MongoDriver
+                driver = MongoDriver(self.url)
+            elif self.backend_type in (StorageBackend.SQLITE, StorageBackend.POSTGRES, StorageBackend.MYSQL, StorageBackend.MSSQL):
+                from llmcycle.drivers.sql import SQLDriver
+                driver = SQLDriver(self.url)
+                
+        self.driver = driver
+            
         self._backend: Optional[BaseStorage] = None
         self.analytics: Optional[Analytics] = None
 
@@ -152,14 +181,14 @@ class StorageManager:
         if b in (StorageBackend.SQLITE, StorageBackend.POSTGRES,
                  StorageBackend.MYSQL, StorageBackend.MSSQL):
             from llmcycle.storage.backends.sql import SQLStorage
-            return SQLStorage(self.url, schema=self.schema, table_prefix=self.table_prefix)
+            return SQLStorage(self.url, schema=self.schema, table_prefix=self.table_prefix, driver=self.driver)
         elif b == StorageBackend.MONGO:
             from llmcycle.storage.backends.mongo import MongoStorage
             db_name = self.schema or "llmcycle"
-            return MongoStorage(self.url, db_name=db_name, collection_prefix=self.table_prefix)
+            return MongoStorage(self.url, db_name=db_name, collection_prefix=self.table_prefix, driver=self.driver)
         elif b == StorageBackend.REDIS:
             from llmcycle.storage.backends.redis_ import RedisStorage
-            return RedisStorage(self.url, key_prefix=self.table_prefix)
+            return RedisStorage(self.url, key_prefix=self.table_prefix, driver=self.driver)
         else:
             raise ValueError(
                 f"No backend configured. Set LLMCYCLE_STORAGE_BACKEND or pass backend=StorageBackend.SQLITE"

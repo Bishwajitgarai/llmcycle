@@ -19,7 +19,7 @@ from sqlalchemy import Text, Float, Integer, Boolean, select, delete, update
 from llmcycle.storage.base import BaseStorage
 from llmcycle.storage.models import (
     Workplace, Team, User, Session, LLMRequest, HistoryMessage,
-    ToolCall, RequestFeedback,
+    ToolCall, RequestFeedback, StoreConfig
 )
 
 
@@ -167,10 +167,11 @@ class SQLStorage(BaseStorage):
         mssql:    mssql+aioodbc://user:pass@host/db?driver=ODBC+Driver+18+for+SQL+Server
     """
 
-    def __init__(self, url: str, schema: Optional[str] = None, table_prefix: str = "llmc_"):
+    def __init__(self, url: str, schema: Optional[str] = None, table_prefix: str = "llmc_", driver=None):
         self.url = url
         self.schema = schema
         self.table_prefix = table_prefix
+        self.driver = driver
         self._engine = None
         self._session_factory = None
         self._meta: Optional[Base] = None
@@ -676,3 +677,31 @@ class SQLStorage(BaseStorage):
                 comment=r.comment, tags=_ul(r.tags),
                 created_at=r.created_at, metadata=_u(r.metadata_),
             ) for r in rows]
+
+    async def save_config(self, config: StoreConfig) -> None:
+        async with self._session_factory() as s:
+            import time
+            CR = self.ConfigRow
+            # upsert config
+            existing = await s.get(CR, config.key)
+            if existing:
+                existing.value = _j(config.value)
+                existing.updated_at = time.time()
+            else:
+                s.add(CR(
+                    key=config.key,
+                    value=_j(config.value),
+                    updated_at=time.time()
+                ))
+            await s.commit()
+
+    async def get_config(self, key: str) -> Optional[StoreConfig]:
+        async with self._session_factory() as s:
+            row = await s.get(self.ConfigRow, key)
+            if row:
+                return StoreConfig(
+                    key=row.key,
+                    value=_u(row.value),
+                    updated_at=row.updated_at
+                )
+            return None

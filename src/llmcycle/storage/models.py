@@ -219,3 +219,11 @@ class HistoryMessage(BaseModel):
     tool_call_id: Optional[str] = None     # for role="tool" — links to ToolCall.id
     created_at: float = Field(default_factory=_now)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+# ─── Config Store ─────────────────────────────────────────────────────────────
+
+class StoreConfig(BaseModel):
+    """Generic Key-Value store for dynamic configurations (groups, etc)."""
+    key: str
+    value: Dict[str, Any] = Field(default_factory=dict)
+    updated_at: float = Field(default_factory=_now)

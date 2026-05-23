@@ -25,6 +25,7 @@ class RoutingStrategy(Enum):
     CANARY         = "canary"          # canary percentage traffic splits
     WEIGHTED       = "weighted"        # weight-based routing
     COST_OPTIMIZED = "cost_optimized"  # route to cheapest provider first
+    ACTIVE_FIRST   = "active_first"    # prioritize active providers (healthy keys)
 
 
 class LatencyTracker:
@@ -64,21 +65,34 @@ class ModelRouter:
         fallbacks: Optional[Dict[str, Any]] = None,
         strategy: RoutingStrategy = RoutingStrategy.PRIORITY,
         pricing: Optional[Dict[str, Dict[str, float]]] = None,
+        groups=None, # Optional[Union[Dict[str, List[str]], GroupManager]]
+        key_manager=None, # Optional[KeyManager]
     ):
         self.fallbacks = fallbacks or {}
         self.strategy  = strategy
         self.pricing   = pricing or {}   # shared with client — same DEFAULT_PRICING dict
+        
+        # If passed a dict, wrap it in GroupManager. Otherwise keep it.
+        from llmcycle.core.groups import GroupManager
+        if isinstance(groups, dict) or groups is None:
+            self.groups = GroupManager(groups)
+        else:
+            self.groups = groups
+            
+        self.key_manager = key_manager
         self.latency   = LatencyTracker()
         self._rr_index: Dict[str, int] = {}
         self._lock     = threading.Lock()
 
-    def get_route(self, model: str) -> List[Tuple[str, str]]:
+    def get_route(self, model: str, strategy: Optional[RoutingStrategy] = None) -> List[Tuple[str, str]]:
         """
         Returns ordered list of (provider, model) tuples to try.
         Input model format: "provider/model" or just "model".
         """
+        current_strategy = strategy or self.strategy
+        
         # Under CANARY or WEIGHTED strategies, look up if a dictionary weight split is configured
-        if self.strategy in (RoutingStrategy.CANARY, RoutingStrategy.WEIGHTED):
+        if current_strategy in (RoutingStrategy.CANARY, RoutingStrategy.WEIGHTED):
             fb_val = self.fallbacks.get(model)
             if isinstance(fb_val, dict) and fb_val:
                 import random
@@ -91,7 +105,12 @@ class ModelRouter:
                 remaining.sort(key=lambda c: fb_val[c], reverse=True)
 
                 candidates = [parse_model(selected)] + [parse_model(r) for r in remaining]
-                return candidates
+                return self._apply_strategy(candidates, model)
+
+        # Handle groups
+        if model in self.groups:
+            candidates = [parse_model(m) for m in self.groups.get(model)]
+            return self._apply_strategy(candidates, model)
 
         primary_provider, primary_model = parse_model(model)
         candidates = [(primary_provider, primary_model)]
@@ -110,17 +129,25 @@ class ModelRouter:
         for fb in fb_list:
             candidates.append(parse_model(fb))
 
-        if self.strategy == RoutingStrategy.LOWEST_LATENCY:
+        return self._apply_strategy(candidates, model, strategy=current_strategy)
+
+    def _apply_strategy(self, candidates: List[Tuple[str, str]], model: str, strategy: Optional[RoutingStrategy] = None) -> List[Tuple[str, str]]:
+        current_strategy = strategy or self.strategy
+        if current_strategy == RoutingStrategy.LOWEST_LATENCY:
             candidates.sort(key=lambda t: self.latency.get(t[0]))
 
-        elif self.strategy == RoutingStrategy.ROUND_ROBIN:
+        elif current_strategy == RoutingStrategy.ROUND_ROBIN:
             with self._lock:
                 idx = self._rr_index.get(model, 0)
                 candidates = candidates[idx:] + candidates[:idx]
                 self._rr_index[model] = (idx + 1) % len(candidates)
 
-        elif self.strategy == RoutingStrategy.COST_OPTIMIZED:
+        elif current_strategy == RoutingStrategy.COST_OPTIMIZED:
             candidates.sort(key=lambda t: self._input_cost(t[1] or t[0]))
+
+        elif current_strategy == RoutingStrategy.ACTIVE_FIRST and self.key_manager:
+            # Sort such that providers with active keys are placed first (False sorts before True, so we negate)
+            candidates.sort(key=lambda t: not self.key_manager.has_active_keys(t[0]))
 
         return candidates
 

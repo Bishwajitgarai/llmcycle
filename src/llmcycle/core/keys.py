@@ -172,8 +172,13 @@ class KeyManager:
             "total": len(records),
             "active": sum(1 for r in records if r.is_usable),
             "invalid": sum(1 for r in records if r.status == KeyStatus.INVALID),
-            "rate_limited": sum(1 for r in records if r.status == KeyStatus.RATE_LIMITED),
         }
+
+    def has_active_keys(self, provider: str) -> bool:
+        """Returns True if the provider has at least one usable key."""
+        p = provider.lower()
+        records = self._keys.get(p, [])
+        return any(r.is_usable for r in records)
 
     def _find(self, provider: str, key: str) -> Optional[KeyRecord]:
         p = provider.lower()

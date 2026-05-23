@@ -29,7 +29,7 @@ from llmcycle.schema import CompletionResponse
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _make_client(**kw) -> LLMCycle:
-    with patch.object(LLMCycle, "_auto_load_from_env", return_value=None):
+    with patch.object(LLMCycle, "_auto_load_configs", return_value=None):
         return LLMCycle(**kw)
 
 
