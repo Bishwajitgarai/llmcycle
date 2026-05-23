@@ -85,17 +85,7 @@ asyncio.run(main())
 
 ---
 
-## 📚 Comprehensive Examples
 
-Looking for more advanced usage? Check out our `examples/` directory for production-ready setups:
-
-- [**Full SDK Showcase**](examples/full_sdk_example.py): A master reference initializing LLMCycle with *all* features (storage, cache, guardrails, rate limits, tools, structured output, batching, and streaming).
-- [**Ultimate Production Example**](examples/ultimate_production_example.py): Shows how to cleanly abstract LLMCycle into an application-wide router with groups and fallbacks.
-- [**Production Auto Example**](examples/production_auto_example.py): The "All Auto" pattern where app code never needs to pass models directly.
-- [**Simple Groups Example**](examples/simple_groups_example.py): The easiest way to group models for load balancing.
-- [**Proxy Example**](examples/proxy_example.py): How to route your LLM traffic through a corporate proxy.
-
----
 
 ## 🏆 How LLMCycle Compares
 
@@ -211,6 +201,11 @@ LLMCYCLE_USER_ADMIN_PAASWORD=admin
 ## 📚 Examples
 
 Check out our comprehensive examples directly from the GitHub repository to see LLMCycle in action:
+- [**Full SDK Showcase**](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/full_sdk_example.py): A master reference initializing LLMCycle with *all* features (storage, cache, guardrails, rate limits, tools, structured output, batching, and streaming).
+- [**Ultimate Production Example**](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/ultimate_production_example.py): Shows how to cleanly abstract LLMCycle into an application-wide router with groups and fallbacks.
+- [**Production Auto Example**](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/production_auto_example.py): The "All Auto" pattern where app code never needs to pass models directly.
+- [**Simple Groups Example**](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/simple_groups_example.py): The easiest way to group models for load balancing.
+- [**Proxy Example**](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/proxy_example.py): How to route your LLM traffic through a corporate proxy.
 - [Dynamic Group Routing & Fallbacks](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/dynamic_groups_example.py)
 - [Pluggable Storage Drivers & SQL Customization](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/storage_drivers_example.py)
 - [Global Config Loading with Redis](https://github.com/Bishwajitgarai/llmcycle/blob/main/examples/config_sync_example.py)
