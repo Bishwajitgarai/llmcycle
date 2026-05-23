@@ -1,0 +1,52 @@
+<!-- ── CONSOLE ────────────────────────────────── -->
+    <div id="page-console" class="page">
+      <div class="section-hdr"><div class="section-title">Test Console</div></div>
+      <div class="console-layout">
+        <div>
+          <div class="card-wrap">
+            <div style="margin-bottom:12px;font-size:0.85rem;font-weight:600">Request</div>
+            <label style="font-size:0.78rem;color:var(--muted);display:block;margin-bottom:6px">Model <span style="color:var(--muted2)">(provider/model or just model)</span></label>
+            <input type="text" id="c-model" placeholder="e.g. openai/gpt-4o-mini" style="font-family:var(--mono)">
+            <label style="font-size:0.78rem;color:var(--muted);display:block;margin-bottom:6px">Prompt</label>
+            <textarea id="c-prompt" placeholder="What is the capital of France?" rows="4"></textarea>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+              <div>
+                <label style="font-size:0.78rem;color:var(--muted);display:block;margin-bottom:6px">Temperature</label>
+                <input type="text" id="c-temp" value="0.7">
+              </div>
+              <div>
+                <label style="font-size:0.78rem;color:var(--muted);display:block;margin-bottom:6px">Max Tokens</label>
+                <input type="text" id="c-tokens" value="512">
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+              <div>
+                <label style="font-size:0.78rem;color:var(--muted);display:block;margin-bottom:6px">Max Retries</label>
+                <input type="text" id="c-retries" value="2">
+              </div>
+              <div>
+                <label style="font-size:0.78rem;color:var(--muted);display:block;margin-bottom:6px">Retry Delay (s)</label>
+                <input type="text" id="c-delay" value="1.0">
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <button class="btn btn-primary" onclick="testComplete()" id="run-btn">▶ Run</button>
+              <button class="btn btn-ghost" onclick="testStream()" id="stream-btn">📡 Stream</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="card-wrap" style="height:calc(100% - 0px)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+              <span style="font-size:0.85rem;font-weight:600">Output</span>
+              <button class="btn btn-sm btn-ghost" onclick="clearOutput()">Clear</button>
+            </div>
+            <div class="console-output" id="console-output">// Ready to test...\n</div>
+            <div class="output-meta" id="output-meta"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>

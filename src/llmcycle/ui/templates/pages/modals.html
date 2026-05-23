@@ -1,0 +1,59 @@
+<!-- ── ADD PROVIDER MODAL ─────────────────────────── -->
+<div class="modal-overlay" id="add-modal">
+  <div class="modal">
+    <h2>Add Provider</h2>
+    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">Provider</label>
+    <select id="add-provider-select" onchange="onProviderSelect()">
+      <option value="">— Pick from registry or custom —</option>
+    </select>
+    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">Custom Name <span style="color:var(--muted2)">(leave blank if using registry)</span></label>
+    <input type="text" id="add-custom-name" placeholder="myprovider">
+    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">Base URL</label>
+    <input type="text" id="add-base-url" placeholder="https://api.provider.com/v1" style="font-family:var(--mono)">
+    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">API Keys <span style="color:var(--muted2)">(comma-separated)</span></label>
+    <textarea id="add-keys" placeholder="sk-key1, sk-key2, sk-key3" rows="3"></textarea>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('add-modal')">Cancel</button>
+      <button class="btn btn-primary" style="width:auto" onclick="submitAddProvider()">Add Provider</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── ADD FALLBACK MODAL ─────────────────────────── -->
+<div class="modal-overlay" id="fallback-modal">
+  <div class="modal">
+    <h2>Add Fallback Rule</h2>
+    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">Primary <span style="color:var(--muted2)">(provider or provider/model)</span></label>
+    <input type="text" id="fb-primary" placeholder="deepseek or deepseek/deepseek-chat" style="font-family:var(--mono)">
+    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">Fallbacks <span style="color:var(--muted2)">(comma-separated, in priority order)</span></label>
+    <input type="text" id="fb-fallbacks" placeholder="groq, openai/gpt-4o-mini" style="font-family:var(--mono)">
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('fallback-modal')">Cancel</button>
+      <button class="btn btn-primary" style="width:auto" onclick="submitFallback()">Save Rule</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── MODELS MODAL ───────────────────────────────── -->
+<div class="modal-overlay" id="models-modal">
+  <div class="modal">
+    <h2 id="models-modal-title">Models</h2>
+    <div id="models-modal-content"><div class="loading-row"><div class="spinner"></div> Fetching models...</div></div>
+    <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal('models-modal')">Close</button></div>
+  </div>
+</div>
+
+<!-- ── KEYS MODAL ─────────────────────────────────── -->
+<div class="modal-overlay" id="keys-modal">
+  <div class="modal">
+    <h2 id="keys-modal-title">Add Keys</h2>
+    <input type="hidden" id="keys-modal-provider">
+    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">New API Keys <span style="color:var(--muted2)">(comma-separated)</span></label>
+    <textarea id="keys-modal-input" placeholder="sk-new-key1, sk-new-key2" rows="3"></textarea>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('keys-modal')">Cancel</button>
+      <button class="btn btn-primary" style="width:auto" onclick="submitAddKeys()">Add Keys</button>
+    </div>
+  </div>
+</div>
+

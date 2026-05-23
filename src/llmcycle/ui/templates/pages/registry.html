@@ -1,0 +1,24 @@
+<!-- ── REGISTRY ───────────────────────────────── -->
+    <div id="page-registry" class="page">
+      <div class="section-hdr">
+        <div class="section-title">Provider Registry</div>
+        <div class="section-count" id="registry-count">0</div>
+        <div class="section-actions">
+          <button class="btn btn-sm btn-ghost" id="export-btn" onclick="exportRegistry()">📥 Export JSON</button>
+        </div>
+      </div>
+      <div class="registry-filters">
+        <input type="text" class="search-input" id="reg-search" placeholder="🔍 Search providers..." oninput="filterRegistry()">
+        <div class="category-filter" id="cat-filters"></div>
+      </div>
+      <div class="card-wrap">
+        <table class="registry-table">
+          <thead><tr><th>Provider</th><th>Env Prefix</th><th>Base URL</th><th>Category</th><th>Action</th></tr></thead>
+          <tbody id="registry-tbody">
+            <tr><td colspan="5"><div class="loading-row"><div class="spinner"></div> Loading registry...</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    

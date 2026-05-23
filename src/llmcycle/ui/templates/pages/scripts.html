@@ -1,0 +1,466 @@
+<div id="toast"></div>
+<script>
+// ── STATE ───────────────────────────────────────────────
+let TOKEN = localStorage.getItem('llmc_token') || '';
+let registry = {};
+let dashData = {};
+let currentFallbacks = {};
+let currentUser = localStorage.getItem('llmc_user') || 'admin';
+
+// ── AUTH ────────────────────────────────────────────────
+document.getElementById('login-form').onsubmit = async (e) => {
+  e.preventDefault();
+  const fd = new URLSearchParams();
+  fd.append('username', document.getElementById('un').value);
+  fd.append('password', document.getElementById('pw').value);
+  const r = await fetch('/api/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: fd });
+  if (r.ok) {
+    const d = await r.json();
+    TOKEN = d.access_token;
+    localStorage.setItem('llmc_token', TOKEN);
+    localStorage.setItem('llmc_user', document.getElementById('un').value);
+    currentUser = document.getElementById('un').value;
+    document.getElementById('user-label').textContent = currentUser;
+    showApp();
+  } else {
+    document.getElementById('login-error').style.display = 'block';
+  }
+};
+
+function logout() {
+  localStorage.removeItem('llmc_token');
+  TOKEN = '';
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('login-screen').style.display = 'flex';
+  document.getElementById('login-error').style.display = 'none';
+}
+
+async function apiFetch(url, opts = {}) {
+  const r = await fetch(url, { ...opts, headers: { 'Authorization': `Bearer ${TOKEN}`, 'Content-Type': 'application/json', ...(opts.headers || {}) } });
+  if (r.status === 401) { logout(); return null; }
+  return r;
+}
+
+// ── INIT ────────────────────────────────────────────────
+if (TOKEN) showApp();
+
+async function showApp() {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  document.getElementById('user-label').textContent = currentUser;
+  await Promise.all([loadRegistry(), refreshDashboard()]);
+}
+
+// ── PAGES ────────────────────────────────────────────────
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  event.target.classList.add('active');
+  if (name === 'routing') loadRouting();
+}
+
+// ── DASHBOARD ────────────────────────────────────────────
+
+async function refreshDashboard() {
+  const [r, sys_r] = await Promise.all([apiFetch('/api/v1/dashboard'), apiFetch('/api/v1/system')]);
+  if (!r) return;
+  dashData = await r.json();
+  const sysData = sys_r ? await sys_r.json() : {};
+
+  document.getElementById('s-providers').textContent = dashData.total_providers;
+  document.getElementById('s-keys').textContent = dashData.total_active_keys;
+  document.getElementById('s-routes').textContent = Object.keys(dashData.fallbacks || {}).length;
+  document.getElementById('s-strategy').textContent = (dashData.strategy || 'priority').replace('_',' ').toUpperCase();
+  
+  if (document.getElementById('s-storage')) {
+    document.getElementById('s-storage').textContent = sysData.storage || 'MemoryStorage';
+  }
+
+  document.getElementById('providers-count').textContent = dashData.total_providers;
+
+  currentFallbacks = dashData.fallbacks || {};
+  renderProviders(dashData.providers || []);
+}
+).length;
+  document.getElementById('s-strategy').textContent = (dashData.strategy || 'priority').replace('_',' ').toUpperCase();
+  document.getElementById('providers-count').textContent = dashData.total_providers;
+
+  currentFallbacks = dashData.fallbacks || {};
+  renderProviders(dashData.providers || []);
+}
+
+function renderProviders(providers) {
+  const grid = document.getElementById('providers-grid');
+  if (!providers.length) {
+    grid.innerHTML = `<div class="empty-state"><div class="empty-icon">🏜️</div><div>No providers loaded.</div><div style="font-size:0.8rem;margin-top:8px;color:var(--muted)">Add <code style="color:var(--cyan)">PROVIDER_API_KEYS=...</code> to your .env or click Add Provider</div></div>`;
+    return;
+  }
+  grid.innerHTML = providers.map(p => {
+    const { total, active, invalid, rate_limited } = p.keys;
+    const badge = active === 0 ? 'badge-error' : (invalid > 0 || rate_limited > 0) ? 'badge-warning' : 'badge-active';
+    const badgeTxt = active === 0 ? 'No Active Keys' : `${active}/${total} Active`;
+    const keyPills = (p.key_stats || []).map(k => {
+      const cls = k.status === 'active' ? 'active' : k.status === 'rate_limited' ? 'rate' : 'invalid';
+      return `<div class="key-pill ${cls}">⬤ ${k.hint}</div>`;
+    }).join('');
+    const latencyStr = p.latency_ms ? `⚡ ${p.latency_ms}ms` : '—';
+    return `
+    <div class="provider-card">
+      <div class="provider-header">
+        <div class="provider-name">${p.name}</div>
+        <div class="provider-badge ${badge}">${badgeTxt}</div>
+      </div>
+      <div class="provider-url">${p.base_url}</div>
+      <div class="provider-meta">
+        <div class="meta-item"><div class="meta-label">Keys</div><div class="meta-value">${total}</div></div>
+        <div class="meta-item"><div class="meta-label">Latency</div><div class="meta-value" style="font-size:0.9rem">${latencyStr}</div></div>
+      </div>
+      <div class="key-pills">${keyPills || '<span style="font-size:0.75rem;color:var(--muted)">No key details</span>'}</div>
+      <div class="divider"></div>
+      <div class="provider-actions">
+        <button class="btn btn-sm btn-ghost" onclick="showModels('${p.name.toLowerCase()}')">📋 Models</button>
+        <button class="btn btn-sm btn-ghost" onclick="openKeysModal('${p.name.toLowerCase()}')">🔑 Add Key</button>
+        <button class="btn btn-sm btn-ghost" style="margin-left:auto" onclick="useInConsole('${p.name.toLowerCase()}')">▶ Test</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── REGISTRY ────────────────────────────────────────────
+const CATEGORIES = {
+  'Frontier / Cloud': ['OPENAI','AZURE','ANTHROPIC','GOOGLE','VERTEXAI','AWS_BEDROCK'],
+  'Fast Inference': ['GROQ','TOGETHER','FIREWORKS','ANYSCALE','PERPLEXITY','OPENROUTER','DEEPINFRA','FEATHERLESS','NOVITA','CHUTES','NSCALE','NEBIUS','HYPERBOLIC','LAMBDA','SAMBANOVA','CEREBRAS','FRIENDLIAI','GALADRIEL','GMI','PUBLICAI','COMETAPI','AIML'],
+  'Chinese / Asia': ['DEEPSEEK','QWEN','DASHSCOPE','MOONSHOT','MINIMAX','ZHIPU','BAIDU','VOLCANO','XIAOMI','ZAI'],
+  'Specialized': ['MISTRAL','CODESTRAL','COHERE','AI21','NLP_CLOUD','ALEPH_ALPHA','PREDIBASE','CLARIFAI','HUGGINGFACE','GRADIENT'],
+  'Local / Self-Hosted': ['OLLAMA','LM_STUDIO','VLLM','LLAMAFILE','TRITON','XINFERENCE','DOCKER_MODEL'],
+  'Enterprise': ['DATABRICKS','SAGEMAKER','SNOWFLAKE','WATSONX','SAP','OCI','CLOUDFLARE','HEROKU','OVH','SCALEWAY','DATAROBOT','NVIDIA','NVIDIA_NIM'],
+  'Dev / Other': ['GITHUB','VERCEL','XAI','BASETEN','REPLICATE','STABILITY','FAL','RECRAFT','RUNWAYML','BLACK_FOREST'],
+};
+
+function getCategoryFor(key) {
+  for (const [cat, keys] of Object.entries(CATEGORIES)) {
+    if (keys.includes(key)) return cat;
+  }
+  return 'Other';
+}
+
+let filteredRegistry = [];
+let activeCategory = 'All';
+
+async function loadRegistry() {
+  const r = await apiFetch('/api/v1/registry');
+  if (!r) return;
+  registry = await r.json();
+  filteredRegistry = Object.entries(registry);
+  document.getElementById('registry-count').textContent = filteredRegistry.length;
+
+  // Build category filters
+  const cats = ['All', ...Object.keys(CATEGORIES), 'Other'];
+  document.getElementById('cat-filters').innerHTML = cats.map(c =>
+    `<button class="cat-btn${c==='All'?' active':''}" onclick="setCat('${c}',this)">${c}</button>`
+  ).join('');
+
+  // Populate add-modal select
+  const sel = document.getElementById('add-provider-select');
+  sel.innerHTML = '<option value="">— Pick from registry or custom —</option>' +
+    Object.entries(registry).map(([k,v]) => `<option value="${k}" data-url="${v}">${k} — ${v}</option>`).join('');
+
+  renderRegistry();
+}
+
+function setCat(cat, btn) {
+  activeCategory = cat;
+  document.querySelectorAll('.cat-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  filterRegistry();
+}
+
+function filterRegistry() {
+  const q = document.getElementById('reg-search').value.toLowerCase();
+  filteredRegistry = Object.entries(registry).filter(([k,v]) => {
+    const matchCat = activeCategory === 'All' || getCategoryFor(k) === activeCategory;
+    const matchQ = !q || k.toLowerCase().includes(q) || v.toLowerCase().includes(q);
+    return matchCat && matchQ;
+  });
+  document.getElementById('registry-count').textContent = filteredRegistry.length;
+  renderRegistry();
+}
+
+function renderRegistry() {
+  const loaded = new Set((dashData.providers || []).map(p => p.name));
+  const tbody = document.getElementById('registry-tbody');
+  tbody.innerHTML = filteredRegistry.map(([k, url]) => {
+    const isLoaded = loaded.has(k.toLowerCase());
+    return `<tr>
+      <td><span style="font-weight:600">${k}</span>${isLoaded ? ' <span class="provider-badge badge-active" style="font-size:0.65rem;padding:1px 6px">loaded</span>' : ''}</td>
+      <td><code style="font-family:var(--mono);color:var(--yellow);font-size:0.78rem">${k}_API_KEYS</code></td>
+      <td><span class="mono">${url}</span></td>
+      <td style="color:var(--muted);font-size:0.78rem">${getCategoryFor(k)}</td>
+      <td>
+        ${isLoaded
+          ? `<button class="btn btn-sm btn-ghost" onclick="showModels('${k.toLowerCase()}')">Models</button>`
+          : `<button class="btn btn-sm btn-cyan" onclick="quickAdd('${k}','${url}')">+ Add</button>`
+        }
+      </td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted)">No results</td></tr>';
+}
+
+function exportRegistry() {
+  const blob = new Blob([JSON.stringify(registry, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'llmcycle-registry.json'; a.click();
+  toast('Registry exported!', 'success');
+}
+
+// ── ROUTING ───────────────────────────────────────────────
+async function loadRouting() {
+  const r = await apiFetch('/api/v1/router');
+  if (!r) return;
+  const data = await r.json();
+  currentFallbacks = data.fallbacks || {};
+
+  // Strategy
+  document.querySelectorAll('.strat-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.v === data.strategy);
+  });
+
+  // Fallbacks
+  const fc = document.getElementById('fallback-container');
+  const fkeys = Object.keys(currentFallbacks);
+  fc.innerHTML = fkeys.length ? fkeys.map(primary => {
+    const tos = currentFallbacks[primary];
+    return `<div class="fallback-rule">
+      <span class="fallback-from">📌 ${primary}</span>
+      <span class="fallback-arrow">→</span>
+      <span class="fallback-to">${tos.join(' → ')}</span>
+      <button class="btn btn-sm btn-danger" style="margin-left:auto" onclick="removeFallback('${primary}')">✕</button>
+    </div>`;
+  }).join('') : `<div style="color:var(--muted);font-size:0.85rem">No fallback rules configured. Add one above.</div>`;
+
+  // Latencies
+  const latencies = data.latencies || {};
+  const lc = document.getElementById('latency-container');
+  const lat = Object.entries(latencies);
+  lc.innerHTML = lat.length ? lat.sort((a,b) => a[1]-b[1]).map(([p, ms]) => {
+    const pct = Math.min(100, (ms / 2000) * 100);
+    const color = ms < 300 ? 'var(--green)' : ms < 800 ? 'var(--yellow)' : 'var(--red)';
+    return `<div style="margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:0.85rem">
+        <span>${p}</span><span style="color:${color};font-family:var(--mono)">${ms.toFixed(0)}ms</span>
+      </div>
+      <div class="latency-bar-wrap"><div class="latency-bar" style="width:${pct}%;background:${color}"></div></div>
+    </div>`;
+  }).join('') : `<div style="color:var(--muted);font-size:0.85rem">No latency data yet. Run some requests via the Test Console.</div>`;
+}
+
+async function setStrategy(val) {
+  const r = await apiFetch(`/api/v1/router/strategy?strategy=${val}`, { method: 'PUT' });
+  if (r && r.ok) {
+    document.querySelectorAll('.strat-btn').forEach(b => b.classList.toggle('active', b.dataset.v === val));
+    toast(`Strategy set to ${val.replace('_',' ')}`, 'success');
+    document.getElementById('s-strategy').textContent = val.replace('_',' ').toUpperCase();
+  }
+}
+
+function openFallbackModal() { document.getElementById('fallback-modal').classList.add('open'); }
+
+async function submitFallback() {
+  const primary = document.getElementById('fb-primary').value.trim();
+  const fbs = document.getElementById('fb-fallbacks').value.split(',').map(x => x.trim()).filter(Boolean);
+  if (!primary || !fbs.length) { toast('Fill in primary and fallbacks', 'error'); return; }
+  currentFallbacks[primary] = fbs;
+  const r = await apiFetch('/api/v1/router/fallbacks', { method: 'POST', body: JSON.stringify({ fallbacks: currentFallbacks }) });
+  if (r && r.ok) { toast('Fallback rule saved!', 'success'); closeModal('fallback-modal'); loadRouting(); }
+}
+
+async function removeFallback(primary) {
+  delete currentFallbacks[primary];
+  const r = await apiFetch('/api/v1/router/fallbacks', { method: 'POST', body: JSON.stringify({ fallbacks: currentFallbacks }) });
+  if (r && r.ok) { toast(`Removed fallback for ${primary}`, 'info'); loadRouting(); }
+}
+
+// ── CONSOLE ───────────────────────────────────────────────
+function clearOutput() {
+  document.getElementById('console-output').textContent = '// Ready...\n';
+  document.getElementById('output-meta').innerHTML = '';
+}
+
+async function testComplete() {
+  const model = document.getElementById('c-model').value.trim();
+  const prompt = document.getElementById('c-prompt').value.trim();
+  if (!model || !prompt) { toast('Enter model and prompt', 'error'); return; }
+  document.getElementById('console-output').textContent = '⏳ Completing...\n';
+  document.getElementById('output-meta').innerHTML = '';
+  const body = {
+    model, prompt,
+    temperature: parseFloat(document.getElementById('c-temp').value) || 0.7,
+    max_tokens: parseInt(document.getElementById('c-tokens').value) || 512,
+    max_retries: parseInt(document.getElementById('c-retries').value) || 2,
+    retry_delay: parseFloat(document.getElementById('c-delay').value) || 1.0,
+  };
+  const r = await apiFetch('/api/v1/complete', { method: 'POST', body: JSON.stringify(body) });
+  if (!r) return;
+  if (r.ok) {
+    const d = await r.json();
+    document.getElementById('console-output').textContent = d.content;
+    document.getElementById('output-meta').innerHTML = `
+      <span class="output-tag provider">🏢 ${d.provider}</span>
+      <span class="output-tag latency">⚡ ${d.latency_ms}ms</span>
+      <span class="output-tag tokens">🔤 ${d.tokens.prompt}→${d.tokens.completion} tokens</span>`;
+    toast('Complete!', 'success');
+  } else {
+    const e = await r.json();
+    document.getElementById('console-output').textContent = `❌ Error: ${e.detail}`;
+    toast(e.detail, 'error');
+  }
+}
+
+async function testStream() {
+  const model = document.getElementById('c-model').value.trim();
+  const prompt = document.getElementById('c-prompt').value.trim();
+  if (!model || !prompt) { toast('Enter model and prompt', 'error'); return; }
+  const retries = document.getElementById('c-retries').value || 2;
+  const delay = document.getElementById('c-delay').value || 1.0;
+  const out = document.getElementById('console-output');
+  out.textContent = '📡 Streaming...\n';
+  document.getElementById('output-meta').innerHTML = '';
+  const url = `/api/v1/stream?model=${encodeURIComponent(model)}&prompt=${encodeURIComponent(prompt)}&max_retries=${retries}&retry_delay=${delay}`;
+  const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${TOKEN}` } });
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  out.textContent = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const chunk = line.slice(6);
+        if (chunk === '[DONE]') { toast('Stream complete!', 'success'); break; }
+        if (chunk.startsWith('[ERROR]')) { out.textContent += '\n' + chunk; toast(chunk, 'error'); break; }
+        out.textContent += chunk;
+        out.scrollTop = out.scrollHeight;
+      }
+    }
+  }
+}
+
+function useInConsole(providerName) {
+  showPage('console');
+  document.querySelectorAll('.nav-btn').forEach((b,i) => { if(i===3) b.classList.add('active'); else b.classList.remove('active'); });
+  document.getElementById('c-model').value = `${providerName}/`;
+  document.getElementById('c-prompt').focus();
+}
+
+// ── MODALS ────────────────────────────────────────────────
+function openAddModal() { document.getElementById('add-modal').classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+function onProviderSelect() {
+  const sel = document.getElementById('add-provider-select');
+  const opt = sel.selectedOptions[0];
+  if (opt && opt.dataset.url) {
+    document.getElementById('add-custom-name').value = '';
+    document.getElementById('add-base-url').value = opt.dataset.url;
+  }
+}
+
+function quickAdd(name, url) {
+  document.getElementById('add-provider-select').value = name;
+  document.getElementById('add-base-url').value = url;
+  document.getElementById('add-custom-name').value = '';
+  document.getElementById('add-modal').classList.add('open');
+}
+
+async function submitAddProvider() {
+  const selVal = document.getElementById('add-provider-select').value;
+  const customName = document.getElementById('add-custom-name').value.trim();
+  const name = customName || selVal;
+  const base_url = document.getElementById('add-base-url').value.trim() || undefined;
+  const rawKeys = document.getElementById('add-keys').value;
+  const api_keys = rawKeys.split(',').map(k => k.trim()).filter(Boolean);
+  if (!name) { toast('Provider name required', 'error'); return; }
+  if (!api_keys.length) { toast('At least one API key required', 'error'); return; }
+  const body = { name, api_keys };
+  if (base_url) body.base_url = base_url;
+  const r = await apiFetch('/api/v1/providers', { method: 'POST', body: JSON.stringify(body) });
+  if (r && r.ok) { toast(`${name} added!`, 'success'); closeModal('add-modal'); refreshDashboard(); }
+  else { const e = await r.json(); toast(e.detail, 'error'); }
+}
+
+async function showModels(provider) {
+  document.getElementById('models-modal-title').textContent = `${provider.toUpperCase()} Models`;
+  document.getElementById('models-modal-content').innerHTML = '<div class="loading-row"><div class="spinner"></div> Fetching...</div>';
+  document.getElementById('models-modal').classList.add('open');
+  const r = await apiFetch(`/api/v1/providers/${provider}/models`);
+  if (!r) return;
+  const d = await r.json();
+  if (!d.models.length) {
+    document.getElementById('models-modal-content').innerHTML = '<div style="color:var(--muted)">No models returned (check API key).</div>';
+    return;
+  }
+  document.getElementById('models-modal-content').innerHTML = `
+    <div style="color:var(--muted);font-size:0.8rem;margin-bottom:12px">${d.count} models available. Click to use in console.</div>
+    <div class="models-grid">${d.models.map(m =>
+      `<div class="model-tag" onclick="selectModel('${provider}','${m}')">${m}</div>`
+    ).join('')}</div>`;
+}
+
+function selectModel(provider, model) {
+  document.getElementById('c-model').value = `${provider}/${model}`;
+  closeModal('models-modal');
+  showPage('console');
+  document.querySelectorAll('.nav-btn').forEach((b,i) => { if(i===3) b.classList.add('active'); else b.classList.remove('active'); });
+  toast(`Model set: ${provider}/${model}`, 'info');
+}
+
+function openKeysModal(provider) {
+  document.getElementById('keys-modal-title').textContent = `Add Keys to ${provider.toUpperCase()}`;
+  document.getElementById('keys-modal-provider').value = provider;
+  document.getElementById('keys-modal-input').value = '';
+  document.getElementById('keys-modal').classList.add('open');
+}
+
+async function submitAddKeys() {
+  const provider = document.getElementById('keys-modal-provider').value;
+  const keys = document.getElementById('keys-modal-input').value.split(',').map(k => k.trim()).filter(Boolean);
+  if (!keys.length) { toast('Enter at least one key', 'error'); return; }
+  const r = await apiFetch(`/api/v1/providers/${provider}/keys`, { method: 'POST', body: JSON.stringify({ keys }) });
+  if (r && r.ok) { toast(`${keys.length} key(s) added to ${provider}`, 'success'); closeModal('keys-modal'); refreshDashboard(); }
+}
+
+// Close modals on overlay click
+document.querySelectorAll('.modal-overlay').forEach(o => {
+  o.addEventListener('click', e => { if (e.target === o) o.classList.remove('open'); });
+});
+
+// ── TOAST ─────────────────────────────────────────────────
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast-item toast-${type}`;
+  el.textContent = msg;
+  document.getElementById('toast').appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+
+// ── AUTO REFRESH ──────────────────────────────────────────
+setInterval(() => {
+  if (TOKEN && document.getElementById('page-overview').classList.contains('active')) refreshDashboard();
+}, 15000);
+</script>
+</body>
+</html>
+
+async function loadGroups() {
+  const r = await apiFetch('/api/v1/groups');
+  if(!r) return;
+  const groups = await r.json();
+  document.getElementById('groups-count').textContent = groups.length;
+  const container = document.getElementById('groups-container');
+  container.innerHTML = groups.length ? groups.map(g => '<div class="fallback-rule"><span class="fallback-from">' + g.id + '</span> <span class="fallback-arrow">&rarr;</span> <span class="fallback-to">' + g.models.join(', ') + '</span> <span class="badge-active" style="padding:3px 8px; border-radius:10px; margin-left:auto; font-size:0.75rem">' + (g.strategy || 'priority') + '</span></div>').join('') : '<div style="color:var(--muted);font-size:0.85rem">No groups configured.</div>';
+}

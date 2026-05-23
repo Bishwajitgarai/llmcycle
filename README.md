@@ -97,6 +97,9 @@ asyncio.run(main())
 | **Mid-stream failover** | ✅ with context | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Provider auto-discovery from `.env`** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Priority / Round-Robin / Latency routing** | ✅ | ❌ | ❌ | ❌ | ✅ Paid | ❌ |
+| **Dynamic Routing Groups (Aliases)** | ✅ Runtime Dynamic | ❌ | ❌ | ❌ | ✅ Paid | ❌ |
+| **Global Config Auto-Sync (Redis)** | ✅ Built-in ConfigLoader | ❌ | ❌ | ❌ | ✅ Paid | ❌ |
+| **Pluggable DB Storage (SQL/Redis/Mongo)** | ✅ Built-in drivers | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Canary & Weighted Splits** | ✅ Built-in (RoutingStrategy.CANARY) | ❌ | ❌ | ❌ | ✅ Paid | ❌ |
 | **Intent-Based Semantic Routing** | ✅ Built-in (SemanticRouter) | ❌ | ✅ Basic (Hub config) | ❌ | ❌ | ❌ |
 | **Fallback chains (model + provider level)** | ✅ | Partial | Partial | ❌ | ✅ Paid | ❌ |

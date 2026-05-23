@@ -1,0 +1,24 @@
+<!-- ── OVERVIEW ───────────────────────────────── -->
+    <div id="page-overview" class="page active">
+      <div class="stats-row" id="stats-row">
+        <div class="stat-card"><div class="stat-icon">🏢</div><div><div class="stat-value" id="s-providers">—</div><div class="stat-label">Active Providers</div></div></div>
+        <div class="stat-card"><div class="stat-icon">🔑</div><div><div class="stat-value" id="s-keys">—</div><div class="stat-label">Active Keys</div></div></div>
+        <div class="stat-card"><div class="stat-icon">🛣️</div><div><div class="stat-value" id="s-routes">—</div><div class="stat-label">Fallback Routes</div></div></div>
+        <div class="stat-card"><div class="stat-icon">⚡</div><div><div class="stat-value" id="s-strategy">—</div><div class="stat-label">Strategy</div></div></div>
+      </div>
+
+      <!-- Active Providers -->
+      <div class="section-hdr">
+        <div class="section-title">Active Providers</div>
+        <div class="section-count" id="providers-count">0</div>
+        <div class="section-actions">
+          <button class="btn btn-sm btn-ghost" onclick="refreshDashboard()">🔄 Refresh</button>
+          <button class="btn btn-sm btn-cyan" onclick="openAddModal()">+ Add Provider</button>
+        </div>
+      </div>
+      <div class="providers-grid" id="providers-grid">
+        <div class="loading-row"><div class="spinner"></div> Loading providers...</div>
+      </div>
+    </div>
+
+    

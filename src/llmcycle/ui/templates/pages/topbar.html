@@ -1,0 +1,18 @@
+<!-- ── APP ───────────────────────────────────────── -->
+<div id="app">
+  <div class="topbar">
+    <div class="topbar-brand">♻️ LLMCycle</div>
+    <div class="topbar-nav">
+      <button class="nav-btn active" onclick="showPage('overview')">Overview</button>
+      <button class="nav-btn" onclick="showPage('registry')">Registry</button>
+      <button class="nav-btn" onclick="showPage('routing')">Routing</button>
+      <button class="nav-btn" onclick="showPage('console')">Test Console</button>
+    </div>
+    <div class="topbar-right">
+      <div class="status-dot" id="status-dot"></div>
+      <span style="font-size:0.78rem;color:var(--muted2)" id="status-label">Connected</span>
+      <button class="user-chip" onclick="logout()">👤 <span id="user-label">admin</span> · Sign out</button>
+    </div>
+  </div>
+
+  
