@@ -20,6 +20,8 @@ class CompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = None
     presence_penalty: Optional[float] = None
     stop: Optional[Union[str, List[str]]] = None
+    tools: Optional[List[Dict[str, Any]]] = None       # OpenAI tool definitions
+    tool_choice: Optional[Any] = None                  # "auto" | "none" | {type, function}
     extra: Optional[Dict[str, Any]] = None
 
     def to_api_dict(self) -> dict:
@@ -39,6 +41,7 @@ class CompletionResponse(BaseModel):
     completion_tokens: int = 0
     latency_ms: float = 0.0
     created_at: float = Field(default_factory=time.time)
+    tool_calls: Optional[List[Any]] = None  # Populated when model returns tool calls
 
 class StreamChunk(BaseModel):
     content: str

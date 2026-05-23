@@ -30,9 +30,10 @@ class OpenAICompatibleProvider(LLMProvider):
     Perplexity, OpenRouter, Anthropic (via compat layer), and 40+ more.
     """
 
-    def __init__(self, base_url: str, provider_name: str = "unknown"):
+    def __init__(self, base_url: str, provider_name: str = "unknown", proxy: Optional[str] = None):
         self.base_url = base_url.rstrip("/")
         self.provider_name = provider_name
+        self.proxy = proxy
         # Shared LRU + disk cache (singleton across all provider instances)
         self._cache = get_model_info_cache()
 
@@ -44,7 +45,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
     async def get_models(self, api_key: str) -> list[str]:
         """Return sorted list of available model IDs from the provider."""
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=TIMEOUT, proxy=self.proxy) as client:
             try:
                 resp = await client.get(
                     f"{self.base_url}/models",
@@ -88,7 +89,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
         info: dict = {}
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0), proxy=self.proxy) as client:
             # Strategy 1: GET /models/{model_id}  (OpenAI, Groq, Together …)
             try:
                 resp = await client.get(
@@ -157,7 +158,7 @@ class OpenAICompatibleProvider(LLMProvider):
         payload["stream"] = False
 
         t0 = time.monotonic()
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=TIMEOUT, proxy=self.proxy) as client:
             try:
                 resp = await client.post(
                     f"{self.base_url}/chat/completions",
@@ -176,23 +177,32 @@ class OpenAICompatibleProvider(LLMProvider):
 
             data = resp.json()
             choice = data["choices"][0]
+            message = choice.get("message", {})
             usage = data.get("usage", {})
+
+            # Parse tool_calls if the model returned function calls
+            raw_tool_calls = message.get("tool_calls") or []
+            tool_calls = raw_tool_calls if raw_tool_calls else None
+
+            # content may be None when the model only returns tool_calls
+            content = message.get("content") or ""
 
             return CompletionResponse(
                 id=data.get("id", ""),
                 model=data.get("model", request.model),
                 provider=self.provider_name,
-                content=choice["message"]["content"],
+                content=content,
                 prompt_tokens=usage.get("prompt_tokens", 0),
                 completion_tokens=usage.get("completion_tokens", 0),
                 latency_ms=latency_ms,
+                tool_calls=tool_calls,
             )
 
     async def generate_stream(self, request: CompletionRequest, api_key: str) -> AsyncGenerator[str, None]:
         payload = request.to_api_dict()
         payload["stream"] = True
 
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=TIMEOUT, proxy=self.proxy) as client:
             try:
                 async with client.stream(
                     "POST",

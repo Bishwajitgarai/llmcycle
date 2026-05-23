@@ -171,6 +171,8 @@ class LLMCycle:
         # Attachment Storage integration
         attachment_storage: Optional[str] = None,
         attachment_config: Optional[dict] = None,
+        # Proxy settings
+        proxy: Optional[str] = None,
     ):
         logging.basicConfig(level=getattr(logging, log_level.upper(), logging.WARNING))
 
@@ -210,9 +212,10 @@ class LLMCycle:
             **att_cfg
         )
 
-        # ── Budget ─────────────────────────────────────────────────────────────
+        # ── Budget & Proxy ──────────────────────────────────────────────────────
         self.max_cost_usd    = max_cost_usd
         self._total_cost_usd = 0.0         # accumulated cost this session
+        self.proxy           = proxy
 
         # ── Pricing / context ──────────────────────────────────────────────────
         self.pricing         = {**DEFAULT_PRICING, **(pricing or {})}
@@ -276,7 +279,7 @@ class LLMCycle:
                 or f"https://api.{provider_name.lower()}.com/v1"
             )
             p_key = provider_name.lower()
-            self._providers[p_key] = OpenAICompatibleProvider(base_url, provider_name=p_key)
+            self._providers[p_key] = OpenAICompatibleProvider(base_url, provider_name=p_key, proxy=self.proxy)
             self.key_manager.add_keys(p_key, keys)
             logger.info(f"Registered provider [{p_key}] with {len(keys)} key(s) → {base_url}")
 
@@ -286,7 +289,7 @@ class LLMCycle:
         """Manually register a provider at runtime."""
         p = name.lower()
         url = base_url or PROVIDER_REGISTRY.get(name.upper()) or f"https://api.{p}.com/v1"
-        self._providers[p] = OpenAICompatibleProvider(url, provider_name=p)
+        self._providers[p] = OpenAICompatibleProvider(url, provider_name=p, proxy=self.proxy)
         self.key_manager.add_keys(p, api_keys)
 
     def get_providers(self) -> List[str]:
@@ -827,13 +830,32 @@ class LLMCycle:
         messages: Optional[List[dict]] = None,
         schema: Type[T] = None,
         max_retries_parse: int = 2,
+        use_tool_format: bool = True,   # ← True by default: tool-calling is more reliable
         **kwargs,
     ) -> T:
         """
         Return a parsed Pydantic model instead of raw text.
 
-        The LLM is instructed to respond in JSON. The response is parsed
-        into `schema`. Retries up to max_retries_parse times on parse failure.
+        By default (use_tool_format=True) this method drives the extraction
+        via the **OpenAI tool-calling API** rather than plain JSON prompting.
+        The model is given a single synthetic tool whose parameters match
+        the Pydantic schema exactly; it is forced to call that tool, so the
+        response arrives as structured key-value pairs — no JSON parsing
+        required, no markdown stripping, no regex heuristics.
+
+        Fall-back: if use_tool_format=False, OR if the provider returns no
+        tool-call (model doesn't support function-calling), the method
+        automatically falls back to the classic JSON-prompt approach with
+        up to max_retries_parse self-correction loops.
+
+        Args:
+            model:             Model string, e.g. "openai/gpt-4o-mini".
+            prompt:            User message (convenience).
+            messages:          Full messages list (overrides prompt).
+            schema:            Pydantic BaseModel subclass to populate.
+            max_retries_parse: Fallback retry budget for JSON-prompt mode.
+            use_tool_format:   True (default) → tool-calling API.
+                               False → legacy JSON-prompt approach.
 
         Usage::
 
@@ -842,59 +864,134 @@ class LLMCycle:
                 temperature_c: float
                 conditions: str
 
+            # Tool-calling mode (default — most reliable)
+            answer = await client.complete_structured(
+                "openai/gpt-4o-mini",
+                prompt="What's the weather in London?",
+                schema=WeatherAnswer,
+            )
+            print(answer.city, answer.temperature_c)
+
+            # Legacy JSON-prompt mode
             answer = await client.complete_structured(
                 "openai/gpt-4o-mini",
                 prompt="What's the weather in London? Reply as JSON.",
                 schema=WeatherAnswer,
+                use_tool_format=False,
             )
-            print(answer.city, answer.temperature_c)
         """
         if schema is None:
             raise ValueError("schema= is required for complete_structured()")
 
-        schema_hint = f"Reply ONLY with valid JSON matching this schema: {schema.model_json_schema()}"
+        # ── Build base messages ──────────────────────────────────────────────
         if messages is None:
             if prompt is None:
                 raise ValueError("Provide either 'prompt' or 'messages'.")
-            messages = [
-                {"role": "system", "content": schema_hint},
-                {"role": "user", "content": prompt},
-            ]
+            base_messages = [{"role": "user", "content": prompt}]
         else:
-            messages = [{"role": "system", "content": schema_hint}] + list(messages)
+            base_messages = list(messages)
+
+        # ════════════════════════════════════════════════════════════════════
+        # MODE A — Tool-calling (default, most reliable)
+        # The schema is converted into an OpenAI function definition.
+        # The model MUST call it, so fields arrive pre-parsed — zero JSON
+        # parsing headaches, zero markdown stripping.
+        # ════════════════════════════════════════════════════════════════════
+        if use_tool_format:
+            tool_name = f"extract_{schema.__name__.lower()}"
+            tool_def = {
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": (
+                        f"Extract and return structured data as a {schema.__name__} object. "
+                        "Fill every field accurately based on the conversation."
+                    ),
+                    "parameters": schema.model_json_schema(),
+                },
+            }
+
+            response = await self.complete(
+                model,
+                messages=base_messages,
+                tools=[tool_def],
+                tool_choice={"type": "function", "function": {"name": tool_name}},
+                **kwargs,
+            )
+
+            # Parse the tool-call arguments if the model returned one
+            raw_tool_calls = getattr(response, "tool_calls", None) or []
+            for tc in raw_tool_calls:
+                fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+                if fn.get("name") == tool_name:
+                    args_raw = fn.get("arguments", "{}")
+                    try:
+                        data = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                        return schema.model_validate(data)
+                    except Exception as e:
+                        logger.warning(
+                            f"complete_structured tool-call parse failed ({e}); "
+                            "falling back to JSON-prompt mode."
+                        )
+                        break  # fall through to MODE B below
+
+            # No tool_calls in response — provider doesn't support it; fall back
+            logger.info(
+                "complete_structured: no tool_calls in response — "
+                "retrying with JSON-prompt fallback."
+            )
+
+        # ════════════════════════════════════════════════════════════════════
+        # MODE B — JSON-prompt (legacy / explicit fallback)
+        # The model is asked to output plain JSON. We parse it ourselves,
+        # with self-correction loops on failure.
+        # ════════════════════════════════════════════════════════════════════
+        schema_hint = (
+            f"Reply ONLY with valid JSON matching this schema: "
+            f"{json.dumps(schema.model_json_schema(), indent=2)}\n"
+            "Do not include any text outside the JSON object."
+        )
+        fb_messages = [{"role": "system", "content": schema_hint}] + base_messages
 
         last_error = None
+        raw = ""
         for attempt in range(max_retries_parse + 1):
-            response = await self.complete(model, messages=messages, **kwargs)
+            response = await self.complete(model, messages=fb_messages, **kwargs)
             raw = (response.content or "").strip()
+
             # Strip markdown code fences if present
             if raw.startswith("```"):
-                raw = raw.split("```")[1]
+                parts = raw.split("```")
+                raw = parts[1] if len(parts) > 1 else raw
                 if raw.startswith("json"):
                     raw = raw[4:]
                 raw = raw.strip()
+
             try:
                 data = json.loads(raw)
                 return schema.model_validate(data)
             except Exception as e:
                 last_error = e
-                logger.warning(f"complete_structured parse attempt {attempt+1} failed: {e}")
+                logger.warning(
+                    f"complete_structured JSON-prompt attempt {attempt+1} failed: {e}"
+                )
                 if attempt < max_retries_parse:
-                    # JSON auto-healing correction instruction loop feedback
-                    messages = list(messages) + [
+                    # Self-correction: feed the bad output + error back to the model
+                    fb_messages = list(fb_messages) + [
                         {"role": "assistant", "content": raw},
                         {
                             "role": "user",
                             "content": (
-                                f"The response was not valid JSON or did not match the required schema.\n"
-                                f"Validation Error: {e}\n"
-                                f"Please output ONLY valid JSON matching the schema."
-                            )
-                        }
+                                f"The response was not valid JSON or did not match the schema.\n"
+                                f"Validation error: {e}\n"
+                                "Please output ONLY a valid JSON object that matches the schema."
+                            ),
+                        },
                     ]
 
         raise StructuredOutputError(
-            f"Failed to parse LLM response into {schema.__name__} after {max_retries_parse+1} attempts: {last_error}",
+            f"Failed to parse LLM response into {schema.__name__} after "
+            f"{max_retries_parse+1} attempts: {last_error}",
             raw_response=raw,
         )
 

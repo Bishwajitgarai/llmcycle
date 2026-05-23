@@ -97,9 +97,22 @@ asyncio.run(main())
 | **Mid-stream failover** | ✅ with context | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Provider auto-discovery from `.env`** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Priority / Round-Robin / Latency routing** | ✅ | ❌ | ❌ | ❌ | ✅ Paid | ❌ |
+| **Canary & Weighted Splits** | ✅ Built-in (RoutingStrategy.CANARY) | ❌ | ❌ | ❌ | ✅ Paid | ❌ |
+| **Intent-Based Semantic Routing** | ✅ Built-in (SemanticRouter) | ❌ | ✅ Basic (Hub config) | ❌ | ❌ | ❌ |
 | **Fallback chains (model + provider level)** | ✅ | Partial | Partial | ❌ | ✅ Paid | ❌ |
+| **Pluggable Prompt Caching** | ✅ Built-in (Memory/SQL/Redis) | ✅ Basic (Redis, heavy) | ✅ Basic | ❌ | ✅ Paid | ❌ |
+| **Client-Side Rate Limiting** | ✅ Built-in (RPM/TPM bucket) | ✅ Basic | ❌ | ❌ | ✅ Paid | ❌ |
+| **PII & Secrets Guardrails** | ✅ Built-in (Mask/Unmask) | ✅ Basic | ✅ Basic | ❌ | ✅ Paid | ❌ |
+| **Budget Enforcement** | ✅ Built-in (Cost cap) | ✅ Basic | ❌ | ❌ | ✅ Paid | ❌ |
+| **Context Window Auto-Trim** | ✅ Built-in | ❌ | ✅ Basic | ❌ | ❌ | ❌ |
+| **Structured Pydantic Output** | ✅ Tool-calling (default) + JSON-prompt fallback | ✅ Basic | ✅ Basic | ✅ Basic | ❌ | ❌ |
+| **Agentic Tool Loops (with guard)** | ✅ Built-in loop (complete_with_tools) | ❌ | ✅ Basic | ❌ | ❌ | ❌ |
+| **Multimodal Attachments (local/S3)** | ✅ Local/S3 storage | Basic (payload only) | Basic (payload only) | Basic (payload only) | Partial | ❌ |
+| **Live Model Discovery** | ✅ Parallel CLI/SDK | ✅ SDK | ❌ | Basic | ❌ | ❌ |
 | **70+ providers** | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
 | **Streaming** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| **Parallel Batch Completions** | ✅ Built-in (complete_batch) | ✅ Basic | ✅ Basic | ❌ | ❌ | ❌ |
+| **Request/Response Middleware** | ✅ Hooks (on_before/on_after) | ✅ Basic | ✅ Basic | ❌ | ❌ | ❌ |
 | **Storage layer (SQL/Mongo/Redis)** | ✅ Built-in | ❌ | Partial | ❌ | ❌ | ❌ |
 | **Session / user / history tracking** | ✅ | ❌ | Partial | ❌ | ✅ Paid | ❌ |
 | **Analytics (tokens, latency, errors)** | ✅ | ❌ | ❌ | ❌ | ✅ Paid | ❌ |
