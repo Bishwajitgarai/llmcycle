@@ -85,6 +85,18 @@ asyncio.run(main())
 
 ---
 
+## 📚 Comprehensive Examples
+
+Looking for more advanced usage? Check out our `examples/` directory for production-ready setups:
+
+- [**Full SDK Showcase**](examples/full_sdk_example.py): A master reference initializing LLMCycle with *all* features (storage, cache, guardrails, rate limits, tools, structured output, batching, and streaming).
+- [**Ultimate Production Example**](examples/ultimate_production_example.py): Shows how to cleanly abstract LLMCycle into an application-wide router with groups and fallbacks.
+- [**Production Auto Example**](examples/production_auto_example.py): The "All Auto" pattern where app code never needs to pass models directly.
+- [**Simple Groups Example**](examples/simple_groups_example.py): The easiest way to group models for load balancing.
+- [**Proxy Example**](examples/proxy_example.py): How to route your LLM traffic through a corporate proxy.
+
+---
+
 ## 🏆 How LLMCycle Compares
 
 > We respect every library below — they solve different problems. This table focuses on **LLM routing & reliability** features specifically.
