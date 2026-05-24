@@ -6,9 +6,11 @@ from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field
 import time
 
+
 class Message(BaseModel):
     role: str
     content: Union[str, List[Dict[str, Any]]]
+
 
 class CompletionRequest(BaseModel):
     model: str
@@ -32,6 +34,67 @@ class CompletionRequest(BaseModel):
             d.update(self.extra)
         return d
 
+
+class ToolParameter(BaseModel):
+    """A single parameter definition for a Tool."""
+    type: str = "string"
+    description: str = ""
+    enum: Optional[List[str]] = None
+
+
+class Tool(BaseModel):
+    """
+    A clean, Pythonic way to define an LLM tool (function).
+
+    Instead of writing raw OpenAI-format dicts, use this class:
+
+        from llmcycle import Tool, ToolParameter
+
+        weather_tool = Tool(
+            name="get_weather",
+            description="Get the current weather for a city.",
+            parameters={
+                "city": ToolParameter(type="string", description="City name, e.g. London"),
+                "unit": ToolParameter(type="string", description="Unit", enum=["celsius", "fahrenheit"]),
+            },
+            required=["city"],
+        )
+
+        response = await client.complete_with_tools(
+            model="openai/gpt-4o-mini",
+            prompt="What is the weather in London?",
+            tools=[weather_tool],     # ← pass Tool objects directly
+            tool_executor=my_handler,
+        )
+    """
+    name: str
+    description: str = ""
+    parameters: Dict[str, ToolParameter] = Field(default_factory=dict)
+    required: Optional[List[str]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to OpenAI-compatible tool definition dict."""
+        props = {}
+        for param_name, param in self.parameters.items():
+            prop: Dict[str, Any] = {"type": param.type, "description": param.description}
+            if param.enum:
+                prop["enum"] = param.enum
+            props[param_name] = prop
+
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": props,
+                    "required": self.required or list(self.parameters.keys()),
+                },
+            },
+        }
+
+
 class CompletionResponse(BaseModel):
     id: str
     model: str
@@ -40,8 +103,10 @@ class CompletionResponse(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     latency_ms: float = 0.0
+    cost_usd: Optional[float] = None
     created_at: float = Field(default_factory=time.time)
     tool_calls: Optional[List[Any]] = None  # Populated when model returns tool calls
+
 
 class StreamChunk(BaseModel):
     content: str

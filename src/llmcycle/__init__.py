@@ -6,7 +6,7 @@ agentic tool loops, structured output, prompt caching, budget enforcement,
 and persistent storage — all in one library.
 """
 from .client import LLMCycle
-from .schema import CompletionRequest, Message, CompletionResponse, StreamChunk
+from .schema import CompletionRequest, Message, CompletionResponse, StreamChunk, Tool, ToolParameter
 from .core.keys import KeyManager, KeyStatus
 from .core.router import ModelRouter, RoutingStrategy
 from .core.errors import (
@@ -38,6 +38,7 @@ __all__ = [
     "LLMCycle",
     # Schema
     "CompletionRequest", "Message", "CompletionResponse", "StreamChunk",
+    "Tool", "ToolParameter",
     # Key management
     "KeyManager", "KeyStatus",
     # Routing

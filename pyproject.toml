@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llmcycle"
-version = "0.2.1"
+version = "0.2.2"
 description = "Cycle through multiple LLM providers with smart fallback, load balancing, and unified API with real-time FastAPI dashboard, resilient streaming failover, Pydantic structured output, prompt caching, token budgets, and local/cloud key rotation."
 readme = "README.md"
 requires-python = ">=3.11"

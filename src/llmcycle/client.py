@@ -36,7 +36,7 @@ from typing import (
 
 from dotenv import load_dotenv
 
-from llmcycle.schema import CompletionRequest, CompletionResponse, Message
+from llmcycle.schema import CompletionRequest, CompletionResponse, Message, Tool
 from llmcycle.core.keys import KeyManager
 from llmcycle.core.cache import BaseCache, InMemoryCache
 from llmcycle.core.router import ModelRouter, RoutingStrategy
@@ -1206,6 +1206,13 @@ class LLMCycle:
             print(final.content)
         """
         model = self._resolve_model(model)
+
+        # Normalize tools: accept Tool objects or raw dicts
+        if tools:
+            tools = [
+                t.to_dict() if isinstance(t, Tool) else t
+                for t in tools
+            ]
 
         if messages is None:
             if prompt is None:
