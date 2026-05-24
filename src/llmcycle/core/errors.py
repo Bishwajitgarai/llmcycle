@@ -41,7 +41,10 @@ class StreamInterruptedError(LLMCycleError):
 class AllProvidersFailedError(LLMCycleError):
     """Raised when every provider in the fallback chain fails."""
     def __init__(self, errors: list):
-        msg = f"All {len(errors)} providers failed. Last error: {errors[-1]}"
+        if errors:
+            msg = f"All {len(errors)} providers failed. Last error: {errors[-1]}"
+        else:
+            msg = "All providers failed. No errors recorded (the model may not be supported by any configured provider)."
         super().__init__(msg)
         self.errors = errors
 
