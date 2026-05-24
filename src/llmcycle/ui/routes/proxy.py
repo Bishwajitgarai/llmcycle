@@ -4,7 +4,6 @@ from typing import Dict, Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from .deps import llm_client
-from .constants import PRIMARY_MODELS
 
 router = APIRouter()
 
@@ -73,9 +72,7 @@ async def openai_proxy_chat_completions(req: Dict[str, Any]):
 async def list_models_openai():
     all_models = []
     providers = llm_client.get_providers()
-    if not providers:
-        providers = list(PRIMARY_MODELS.keys())
-        
+
     for p in providers:
         p_lower = p.lower()
         models = []
@@ -83,8 +80,6 @@ async def list_models_openai():
             models = await llm_client.get_models(p_lower)
         except Exception:
             pass
-        if not models:
-            models = PRIMARY_MODELS.get(p_lower, ["default-model"])
         for m in models:
             all_models.append({
                 "id": f"{p_lower}/{m}",

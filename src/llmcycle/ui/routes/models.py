@@ -23,3 +23,10 @@ class TestCompleteRequest(BaseModel):
     max_tokens: Optional[int] = 512
     max_retries: Optional[int] = 2
     retry_delay: Optional[float] = 1.0
+
+class GroupRequest(BaseModel):
+    name: str
+    models: List[str]
+
+class ProxyRequest(BaseModel):
+    proxy: Optional[str] = None

@@ -398,8 +398,25 @@ textarea { resize: vertical; min-height: 70px; }
         <div>
           <div class="card-wrap">
             <div style="margin-bottom:12px;font-size:0.85rem;font-weight:600">Request</div>
-            <label style="font-size:0.78rem;color:var(--muted);display:block;margin-bottom:6px">Model <span style="color:var(--muted2)">(provider/model or just model)</span></label>
-            <input type="text" id="c-model" placeholder="e.g. openai/gpt-4o-mini" style="font-family:var(--mono)">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+              <div>
+                <label style="font-size:0.78rem;color:var(--muted);display:block;margin-bottom:6px">Group (optional)</label>
+                <select id="c-group" onchange="onConsoleGroupChange()" style="width:100%;padding:11px 14px;border-radius:10px;border:1px solid var(--border);background:rgba(0,0,0,0.3);color:var(--text);font-family:inherit;font-size:0.9rem;outline:none">
+                  <option value="">— Use model or provider —</option>
+                </select>
+              </div>
+              <div>
+                <label style="font-size:0.78rem;color:var(--muted);display:block;margin-bottom:6px">Provider / Model</label>
+                <div style="display:flex;gap:8px">
+                  <select id="c-provider" onchange="updateModelOptions()" style="flex:1;padding:11px 14px;border-radius:10px;border:1px solid var(--border);background:rgba(0,0,0,0.3);color:var(--text);font-family:inherit;font-size:0.9rem;outline:none">
+                    <option value="">Select provider</option>
+                  </select>
+                  <select id="c-model" style="width:220px;padding:11px 14px;border-radius:10px;border:1px solid var(--border);background:rgba(0,0,0,0.3);color:var(--text);font-family:inherit;font-size:0.9rem;outline:none">
+                    <option value="">Select model</option>
+                  </select>
+                </div>
+              </div>
+            </div>
             <label style="font-size:0.78rem;color:var(--muted);display:block;margin-bottom:6px">Prompt</label>
             <textarea id="c-prompt" placeholder="What is the capital of France?" rows="4"></textarea>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
@@ -422,9 +439,15 @@ textarea { resize: vertical; min-height: 70px; }
                 <input type="text" id="c-delay" value="1.0">
               </div>
             </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-              <button class="btn btn-primary" onclick="testComplete()" id="run-btn">▶ Run</button>
-              <button class="btn btn-ghost" onclick="testStream()" id="stream-btn">📡 Stream</button>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:center">
+              <div style="display:flex;align-items:center;gap:8px">
+                <label style="font-size:0.85rem;color:var(--muted);display:inline-block">Auto mode</label>
+                <input type="checkbox" id="c-auto" style="width:18px;height:18px;margin-left:6px">
+              </div>
+              <div style="display:flex;gap:8px">
+                <button class="btn btn-primary" onclick="testComplete()" id="run-btn">▶ Run</button>
+                <button class="btn btn-ghost" onclick="testStream()" id="stream-btn">📡 Stream</button>
+              </div>
             </div>
           </div>
         </div>

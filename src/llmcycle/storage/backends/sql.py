@@ -148,6 +148,12 @@ class HistoryRow(Base):
     created_at: Mapped[float]         = mapped_column(Float)
     metadata_: Mapped[str]            = mapped_column("metadata", Text, default="{}")
 
+class ConfigRow(Base):
+    __tablename__ = "configs"
+    key: Mapped[str]        = mapped_column(Text, primary_key=True)
+    value: Mapped[str]      = mapped_column(Text, default="{}")
+    updated_at: Mapped[float] = mapped_column(Float)
+
 
 # ─── Backend ──────────────────────────────────────────────────────────────────
 
@@ -260,6 +266,13 @@ class SQLStorage(BaseStorage):
             created_at: Mapped[float]         = mapped_column(Float)
             metadata_: Mapped[str]            = mapped_column("metadata", Text, default="{}")
 
+        class _ConfigRow(_Base):
+            __tablename__ = f"{p}configs"
+            __table_args__ = ({"schema": s} if s else {})
+            key: Mapped[str]        = mapped_column(Text, primary_key=True)
+            value: Mapped[str]      = mapped_column(Text, default="{}")
+            updated_at: Mapped[float] = mapped_column(Float)
+
         # Expose row classes as instance attributes for CRUD methods
         self.WorkplaceRow = _WorkplaceRow
         self.TeamRow      = _TeamRow
@@ -267,6 +280,7 @@ class SQLStorage(BaseStorage):
         self.SessionRow   = _SessionRow
         self.RequestRow   = _RequestRow
         self.HistoryRow   = _HistoryRow
+        self.ConfigRow    = _ConfigRow
         return _Base
 
     async def connect(self):
@@ -678,26 +692,28 @@ class SQLStorage(BaseStorage):
                 created_at=r.created_at, metadata=_u(r.metadata_),
             ) for r in rows]
 
-    async def save_config(self, config: StoreConfig) -> None:
+    async def save_config(self, key: str, value: dict) -> StoreConfig:
         async with self._session_factory() as s:
             import time
-            CR = self.ConfigRow
-            # upsert config
-            existing = await s.get(CR, config.key)
+            CR = getattr(self, "ConfigRow", ConfigRow)
+            existing = await s.get(CR, key)
+            now = time.time()
             if existing:
-                existing.value = _j(config.value)
-                existing.updated_at = time.time()
+                existing.value = _j(value)
+                existing.updated_at = now
             else:
                 s.add(CR(
-                    key=config.key,
-                    value=_j(config.value),
-                    updated_at=time.time()
+                    key=key,
+                    value=_j(value),
+                    updated_at=now
                 ))
             await s.commit()
+            return StoreConfig(key=key, value=value, updated_at=now)
 
     async def get_config(self, key: str) -> Optional[StoreConfig]:
         async with self._session_factory() as s:
-            row = await s.get(self.ConfigRow, key)
+            CR = getattr(self, "ConfigRow", ConfigRow)
+            row = await s.get(CR, key)
             if row:
                 return StoreConfig(
                     key=row.key,

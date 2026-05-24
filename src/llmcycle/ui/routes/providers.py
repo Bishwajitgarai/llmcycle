@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends
 from .deps import auth, llm_client
 from .models import AddProviderRequest, AddKeyRequest
-from .constants import PRIMARY_MODELS
 
 router = APIRouter()
 
@@ -30,8 +29,6 @@ async def get_provider_models(name: str, _: str = Depends(auth)):
         models = await llm_client.get_models(p_lower)
     except Exception:
         pass
-    if not models:
-        models = PRIMARY_MODELS.get(p_lower, ["default-model"])
     return {"provider": name, "models": models, "count": len(models)}
 
 @router.get("/api/v1/active_models")
@@ -44,9 +41,47 @@ async def get_active_models(_: str = Depends(auth)):
             models = await llm_client.get_models(p_lower)
         except Exception:
             pass
-        if not models:
-            models = PRIMARY_MODELS.get(p_lower, ["default-model"])
         out[p] = models
+    return out
+
+@router.get("/api/v1/active_models_details")
+async def get_active_models_details(_: str = Depends(auth)):
+    out = []
+    for p in llm_client.get_providers():
+        p_lower = p.lower()
+        models = []
+        try:
+            models = await llm_client.get_models(p_lower)
+        except Exception:
+            pass
+        for m in models:
+            full_name = f"{p_lower}/{m}"
+            pricing = llm_client._get_pricing(m) or llm_client._get_pricing(full_name)
+            input_price = pricing.get("input") if pricing else None
+            output_price = pricing.get("output") if pricing else None
+            context_window = llm_client.context_windows.get(m) or llm_client.context_windows.get(full_name)
+            
+            features = []
+            m_lower = m.lower()
+            if any(x in m_lower for x in ("vision", "gpt-4o", "claude-3-5", "gemini-1.5")):
+                features.append("Vision")
+            if any(x in m_lower for x in ("tool", "gpt-", "claude-", "llama-3", "gemini")):
+                features.append("Tool Use")
+            if any(x in m_lower for x in ("instruct", "chat", "gpt", "claude", "llama", "gemini")):
+                features.append("Chat")
+            if "embedding" in m_lower:
+                features.append("Embeddings")
+            features.append("Streaming")
+            
+            out.append({
+                "provider": p_lower,
+                "model": m,
+                "full_name": full_name,
+                "context_window": context_window or 4096,
+                "input_price": input_price,
+                "output_price": output_price,
+                "features": features
+            })
     return out
 
 @router.get("/api/v1/providers/{name}/keys")

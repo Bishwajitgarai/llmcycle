@@ -27,9 +27,22 @@ BASE_DIR = Path(__file__).resolve().parent
 templates_dir = BASE_DIR / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
 
+# Serve static files from the root public directory if it exists
+public_dir = Path(__file__).resolve().parent.parent.parent.parent / "public"
+if public_dir.exists():
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/public", StaticFiles(directory=str(public_dir)), name="public")
+
 app.include_router(api_router)
+
+@app.on_event("startup")
+async def startup_event():
+    from .routes.deps import llm_client
+    if llm_client.storage:
+        await llm_client.storage.connect()
+        await llm_client.router.groups.load()
 
 # ─── Serve SPA ───────────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui(request: Request):
-    return templates.TemplateResponse("base.html", {"request": request})
+     return templates.TemplateResponse(request, "base.html")

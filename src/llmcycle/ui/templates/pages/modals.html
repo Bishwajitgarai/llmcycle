@@ -23,10 +23,43 @@
 <div class="modal-overlay" id="fallback-modal">
   <div class="modal">
     <h2>Add Fallback Rule</h2>
-    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">Primary <span style="color:var(--muted2)">(provider or provider/model)</span></label>
-    <input type="text" id="fb-primary" placeholder="deepseek or deepseek/deepseek-chat" style="font-family:var(--mono)">
-    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">Fallbacks <span style="color:var(--muted2)">(comma-separated, in priority order)</span></label>
-    <input type="text" id="fb-fallbacks" placeholder="groq, openai/gpt-4o-mini" style="font-family:var(--mono)">
+    
+    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">Select Primary Provider & Model</label>
+    <div style="display:flex; gap:8px; margin-bottom:12px; align-items:flex-end;">
+      <select id="fb-primary-provider" style="flex:1; margin-bottom:0;" onchange="onFallbackPrimaryProviderChange()">
+        <option value="">— Select Provider —</option>
+      </select>
+      <div style="display:flex; flex-direction:column; gap:4px; flex:1;">
+        <input type="text" id="fb-primary-model-search" placeholder="🔍 Filter models..." style="margin-bottom:0 !important; font-size:0.75rem; padding:6px 10px; border-radius:8px; border:1px solid var(--border); background:rgba(0,0,0,0.3); color:var(--text); outline:none;" oninput="filterFallbackPrimaryModels()">
+        <select id="fb-primary-model" style="width:100%; margin-bottom:0;" onchange="onFallbackPrimaryModelChange()">
+          <option value="">— Entire Provider —</option>
+        </select>
+      </div>
+    </div>
+    
+    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">Primary Rule Value</label>
+    <input type="text" id="fb-primary" placeholder="deepseek or deepseek/deepseek-chat" style="font-family:var(--mono); margin-bottom:16px;">
+    
+    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">Select Fallbacks to Add</label>
+    <div style="display:flex; gap:8px; margin-bottom:12px; align-items:flex-end;">
+      <select id="fb-fallback-provider" style="flex:1; margin-bottom:0;" onchange="onFallbackProviderChange()">
+        <option value="">— Select Provider —</option>
+      </select>
+      <div style="display:flex; flex-direction:column; gap:4px; flex:1;">
+        <input type="text" id="fb-fallback-model-search" placeholder="🔍 Filter models..." style="margin-bottom:0 !important; font-size:0.75rem; padding:6px 10px; border-radius:8px; border:1px solid var(--border); background:rgba(0,0,0,0.3); color:var(--text); outline:none;" oninput="filterFallbackModels()">
+        <select id="fb-fallback-model" style="width:100%; margin-bottom:0;">
+          <option value="">— Entire Provider —</option>
+        </select>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="addFallbackFromSelect()" style="width: auto; margin-bottom:0;">Add</button>
+    </div>
+    
+    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">Selected Fallbacks Pathway (one below another, scrollable)</label>
+    <input type="hidden" id="fb-fallbacks">
+    <div id="fb-fallbacks-list" class="selected-items-list">
+      <div style="color:var(--muted); font-size:0.8rem; text-align:center; padding:12px;">No fallbacks added yet. Use the select dropdowns above to add.</div>
+    </div>
+    
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal('fallback-modal')">Cancel</button>
       <button class="btn btn-primary" style="width:auto" onclick="submitFallback()">Save Rule</button>
@@ -38,7 +71,10 @@
 <div class="modal-overlay" id="models-modal">
   <div class="modal">
     <h2 id="models-modal-title">Models</h2>
-    <div id="models-modal-content"><div class="loading-row"><div class="spinner"></div> Fetching models...</div></div>
+    <input type="text" id="models-modal-search" placeholder="🔍 Search models..." style="width:100%; padding:8px 14px; margin-bottom:12px; border-radius:10px; border:1px solid var(--border); background:rgba(0,0,0,0.2); color:var(--text); font-size:0.85rem; outline:none;" oninput="filterModelsModalList()">
+    <div id="models-modal-content" style="max-height: 400px; overflow-y: auto; padding-right: 8px;">
+      <div class="loading-row"><div class="spinner"></div> Fetching models...</div>
+    </div>
     <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal('models-modal')">Close</button></div>
   </div>
 </div>
@@ -53,6 +89,40 @@
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal('keys-modal')">Cancel</button>
       <button class="btn btn-primary" style="width:auto" onclick="submitAddKeys()">Add Keys</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── DYNAMIC GROUP MODAL ─────────────────────────── -->
+<div class="modal-overlay" id="group-modal">
+  <div class="modal">
+    <h2 id="group-modal-title">Create / Edit Group</h2>
+    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">Group Name</label>
+    <input type="text" id="group-name" placeholder="fast-fallback-group" style="font-family:var(--mono)">
+    
+    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">Select Provider & Model to Add</label>
+    <div style="display:flex; gap:8px; margin-bottom:12px; align-items:flex-end;">
+      <select id="group-provider-select" style="flex:1; margin-bottom:0;" onchange="onGroupProviderChange()">
+        <option value="">— Select Provider —</option>
+      </select>
+      <div style="display:flex; flex-direction:column; gap:4px; flex:1;">
+        <input type="text" id="group-model-search" placeholder="🔍 Filter models..." style="margin-bottom:0 !important; font-size:0.75rem; padding:6px 10px; border-radius:8px; border:1px solid var(--border); background:rgba(0,0,0,0.3); color:var(--text); outline:none;" oninput="filterGroupModels()">
+        <select id="group-model-select" style="width:100%; margin-bottom:0;">
+          <option value="">— Select Model —</option>
+        </select>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="addGroupModelFromSelect()" style="width: auto; margin-bottom:0;">Add</button>
+    </div>
+    
+    <label style="font-size:0.8rem;color:var(--muted);display:block;margin-bottom:6px">Selected Models Pathway (one below another, scrollable)</label>
+    <input type="hidden" id="group-models-input">
+    <div id="group-models-list" class="selected-items-list">
+      <div style="color:var(--muted); font-size:0.8rem; text-align:center; padding:12px;">No models added to this group yet. Use the select dropdowns above to add.</div>
+    </div>
+    
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('group-modal')">Cancel</button>
+      <button class="btn btn-primary" style="width:auto" onclick="submitGroup()">Save Group</button>
     </div>
   </div>
 </div>

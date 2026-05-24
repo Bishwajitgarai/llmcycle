@@ -384,6 +384,8 @@ except AllProvidersFailedError as e:
 
 ## 🖥️ Web Dashboard
 
+<img src="public/images/dashboard.png" alt="LLMCycle Web Dashboard" width="100%" />
+
 ```bash
 uv run llmcycle ui
 # → http://127.0.0.1:8000
@@ -391,6 +393,23 @@ uv run llmcycle ui
 
 Login with `LLMCYCLE_USER_ADMIN` / `LLMCYCLE_USER_ADMIN_PAASWORD` from your `.env`.  
 The UI uses a **token-based REST API** (`/api/token` → Bearer token), not server-side rendering.
+
+---
+
+## 🌐 Egress Proxy Configuration
+
+LLMCycle supports routing all outgoing requests to LLM providers through a corporate or secure egress proxy server.
+
+### 1. Via Python SDK
+Simply pass the `proxy` parameter when initializing the client:
+```python
+from llmcycle import LLMCycle
+
+client = LLMCycle(proxy="http://your.corporate.proxy:8080")
+```
+
+### 2. Via Web Dashboard
+You can dynamically configure, view, or disable the egress proxy directly from the **Overview** page in the Web Dashboard at runtime. Setting the proxy URL via the UI immediately propagates to all active providers in memory!
 
 ---
 

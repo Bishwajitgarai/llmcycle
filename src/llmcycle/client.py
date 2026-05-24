@@ -347,6 +347,12 @@ class LLMCycle:
         configs = self._config_loader.load_configs()
         for provider_name, config in configs.items():
                 p_key = provider_name.lower()
+                
+                # Prevent environment variable typos by verifying against registry or checking for custom base URL
+                if provider_name.upper() not in PROVIDER_REGISTRY and not config.get("base_url"):
+                    logger.warning(f"Skipping auto-load of invalid/unknown provider '{provider_name}' in env config (no registry match or explicit BASE_URL).")
+                    continue
+
                 keys = [k.strip() for k in config.get("api_keys", "").split(",") if k.strip()]
                 if not keys:
                     continue

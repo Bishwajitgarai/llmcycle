@@ -1,12 +1,13 @@
-<!-- ── APP ───────────────────────────────────────── -->
-<div id="app">
+<!-- ── APP TOPBAR ───────────────────────────────────────── -->
   <div class="topbar">
     <div class="topbar-brand">♻️ LLMCycle</div>
     <div class="topbar-nav">
-      <button class="nav-btn active" onclick="showPage('overview')">Overview</button>
-      <button class="nav-btn" onclick="showPage('registry')">Registry</button>
-      <button class="nav-btn" onclick="showPage('routing')">Routing</button>
-      <button class="nav-btn" onclick="showPage('console')">Test Console</button>
+      <button id="nav-overview" class="nav-btn active" onclick="showPage('overview', this)">Overview</button>
+      <button id="nav-registry" class="nav-btn" onclick="showPage('registry', this)">Registry</button>
+      <button id="nav-routing" class="nav-btn" onclick="showPage('routing', this)">Routing</button>
+      <button id="nav-groups" class="nav-btn" onclick="showPage('groups', this)">Groups</button>
+      <button id="nav-analytics" class="nav-btn" onclick="showPage('analytics', this)">Analytics</button>
+      <button id="nav-console" class="nav-btn" onclick="showPage('console', this)">Test Console</button>
     </div>
     <div class="topbar-right">
       <div class="status-dot" id="status-dot"></div>

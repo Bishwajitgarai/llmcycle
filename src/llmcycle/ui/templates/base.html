@@ -254,9 +254,59 @@ textarea { resize: vertical; min-height: 70px; }
 /* ── Modal ──────────────────────────────────────── */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(6px); z-index: 200; display: none; align-items: center; justify-content: center; }
 .modal-overlay.open { display: flex; }
-.modal { background: var(--bg2); border: 1px solid var(--border2); border-radius: 20px; padding: 32px; width: 520px; max-width: 95vw; max-height: 90vh; overflow-y: auto; }
+.modal { background: var(--bg2); border: 1px solid var(--border2); border-radius: 20px; padding: 32px; width: 680px; max-width: 95vw; max-height: 90vh; overflow-y: auto; }
 .modal h2 { font-size: 1.2rem; font-weight: 700; margin-bottom: 20px; }
 .modal-footer { display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end; }
+
+/* ── Scrollable Models Picker inside Modals ─────── */
+.selected-items-list {
+  max-height: 220px;
+  overflow-y: auto;
+  margin-top: 8px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  background: rgba(0,0,0,0.22);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.selected-item-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: rgba(255,255,255,0.02);
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  transition: all 0.15s ease;
+}
+.selected-item-row:last-child {
+  border-bottom: none;
+}
+.selected-item-row:hover {
+  background: rgba(255,255,255,0.06);
+}
+.selected-item-label {
+  font-family: var(--mono);
+  font-size: 0.83rem;
+  color: var(--cyan);
+  font-weight: 500;
+}
+.selected-item-remove {
+  background: transparent;
+  border: none;
+  color: var(--red);
+  font-weight: 700;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+  font-size: 0.8rem;
+}
+.selected-item-remove:hover {
+  background: rgba(255,59,92,0.15);
+  color: #ff5f7e;
+}
 
 /* ── Latency bar ─────────────────────────────────── */
 .latency-bar-wrap { background: rgba(0,0,0,0.3); border-radius: 4px; height: 6px; width: 100%; }
@@ -279,6 +329,24 @@ textarea { resize: vertical; min-height: 70px; }
 .loading-row { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 0.85rem; padding: 20px; }
 
 .card-wrap { background: var(--glass); border: 1px solid var(--border); border-radius: 16px; padding: 22px; margin-bottom: 20px; }
+
+/* ── Custom Premium Scrollbar ────────────────────── */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
 </style>
 </head>
 <body>
@@ -296,6 +364,7 @@ textarea { resize: vertical; min-height: 70px; }
     {% include "pages/registry.html" %}
     {% include "pages/routing.html" %}
     {% include "pages/groups.html" %}
+    {% include "pages/analytics.html" %}
     {% include "pages/console.html" %}
   </div>
 </div>

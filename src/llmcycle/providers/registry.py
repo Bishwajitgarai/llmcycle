@@ -12,6 +12,7 @@ PROVIDER_REGISTRY: dict[str, str] = {
     "AZURE":            "https://{resource}.openai.azure.com/openai",   # needs override
     "ANTHROPIC":        "https://api.anthropic.com/v1",
     "GOOGLE":           "https://generativelanguage.googleapis.com/v1beta",
+    "GEMINI":           "https://generativelanguage.googleapis.com/v1beta",
     "VERTEXAI":         "https://us-central1-aiplatform.googleapis.com/v1",
     "AWS_BEDROCK":      "https://bedrock-runtime.us-east-1.amazonaws.com",
 
