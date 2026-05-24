@@ -324,7 +324,7 @@ wheels = [
 
 [[package]]
 name = "llmcycle"
-version = "0.1.9"
+version = "0.2.3"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },

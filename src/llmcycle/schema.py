@@ -9,7 +9,11 @@ import time
 
 class Message(BaseModel):
     role: str
-    content: Union[str, List[Dict[str, Any]]]
+    content: Optional[Union[str, List[Dict[str, Any]]]] = None
+    name: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
+
 
 
 class CompletionRequest(BaseModel):

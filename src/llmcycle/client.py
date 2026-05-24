@@ -595,6 +595,8 @@ class LLMCycle:
                                 failure the call behaves as an error (no retry via
                                 shadow_models but surfaces the ValidationError).
         """
+        self._check_budget(0.0)
+        
         if not model and not group:
             raise ValueError("Must provide 'model' or 'group'.")
             
@@ -985,15 +987,33 @@ class LLMCycle:
         finally:
             latency_ms = round((_time.monotonic() - t0) * 1000, 2)
             ttft = round((first_chunk_at - t0) * 1000, 2) if first_chunk_at else None
-            price = self._get_pricing(model or group or "")
             
             response_text = "".join(chunks)
             if self.guardrail:
                 response_text = self.guardrail.unmask_response(response_text)
                 
+            # Estimate cost for stream based on generated text length (rough token heuristic or if tiktoken available)
+            # We use _estimate_tokens to get token count of prompt and response
+            prompt_text = prompt or "".join(self._get_content_text(m.get("content", "")) for m in (messages or []))
+            prompt_tokens = self._estimate_tokens(prompt_text)
+            completion_tokens = self._estimate_tokens(response_text)
+            
+            cost = self._estimate_cost(
+                model or group or "",
+                prompt_tokens,
+                completion_tokens,
+            )
+            self._check_budget(cost)
+            if cost:
+                self._total_cost_usd += cost
+                
+            price = self._get_pricing(model or group or "")
+            
             await self._save(
                 model=model or group or "", provider="",
                 prompt=prompt or "", response=response_text,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
                 latency_ms=latency_ms, time_to_first_token_ms=ttft,
                 timeout_ms=timeout * 1000 if timeout else None,
                 status=status, error=error_msg, cancelled_at=cancelled_at,

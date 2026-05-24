@@ -27,6 +27,7 @@ from .core.errors import (
 from .core.injection import InjectionGuard, InjectionBlockedError
 from .core.prompts import PromptRegistry, PromptVersion
 from .core.semantic_cache import SemanticCache
+from .core.semantic import SemanticRouter
 from .core.secrets import (
     SecretLoader, EnvSecretLoader,
     AWSSecretLoader, GCPSecretLoader, VaultSecretLoader,
@@ -62,10 +63,12 @@ __all__ = [
     "PromptRegistry", "PromptVersion",
     # Semantic cache
     "SemanticCache",
+    # Semantic router
+    "SemanticRouter",
     # Secret loaders
     "SecretLoader", "EnvSecretLoader",
     "AWSSecretLoader", "GCPSecretLoader", "VaultSecretLoader",
     "SecretNotFoundError", "SecretLoadError",
 ]
 
-__version__ = "0.2.1"
+__version__ = "0.2.3"
